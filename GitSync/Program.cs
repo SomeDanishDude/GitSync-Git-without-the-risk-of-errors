@@ -3,12 +3,21 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace GitSync
 {
+    public class ProjectMetadata
+    {
+        public string Name { get; set; } = "MyProject";
+        public string Description { get; set; } = "A new project.";
+        public string Version { get; set; } = "0.1.0";
+        public string RunCommand { get; set; } = "";
+    }
+
     internal class Program
     {
         private static string LogFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gitsync_log.txt");
@@ -31,7 +40,7 @@ namespace GitSync
             Console.Title = "GitSync (C#)";
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine("==========================================");
-            Console.WriteLine("              GitSync (C#)");
+            Console.WriteLine("   GitSync - Git but without pain added   ");
             Console.WriteLine("==========================================");
             Console.ResetColor();
 
@@ -44,71 +53,30 @@ namespace GitSync
                     e.Cancel = false; // Allow termination
                 };
 
-                // 1. Select Folder
-                LogVerbose("Waiting for user to select folder...");
-                string currentDir = AppDomain.CurrentDomain.BaseDirectory;
-                string? selectedFolder = ShowFolderSelection(currentDir);
-                if (selectedFolder == null)
+                while (true)
                 {
-                    Console.WriteLine("No folder selected. Exiting.");
-                    return;
-                }
+                    Console.WriteLine("\nChoose a mode:");
+                    Console.WriteLine("[1] Sync Local Folder (Init/Push)");
+                    Console.WriteLine("[2] Clone & Setup (Startup)");
+                    Console.WriteLine("[3] Exit");
 
-                Directory.SetCurrentDirectory(selectedFolder);
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.WriteLine($"\nSelected Folder: {selectedFolder}");
-                Console.ResetColor();
+                    string choice = GetUserInput("Choice: ");
 
-                // 2. Identity & Credentials
-                CheckGitIdentity();
-                CheckCredentialHelper();
-
-                // 3. Git Init
-                if (!Directory.Exists(".git"))
-                {
-                    LogVerbose("Initializing new Git repository...");
-                    RunGitWithSpinner("init");
-                    gitInitialized = true;
-
-                    // Rename master to main if created
-                    string branch = GetCurrentBranch();
-                    if (branch == "master")
+                    if (choice == "1")
                     {
-                        LogVerbose("Renaming default branch to 'main'...");
-                        RunGitWithSpinner("branch -M main");
+                        HandleLocalSync();
+                        break;
+                    }
+                    else if (choice == "2")
+                    {
+                        HandleClone();
+                        break;
+                    }
+                    else if (choice == "3")
+                    {
+                        return;
                     }
                 }
-                else
-                {
-                    LogVerbose("Git repository already exists.");
-                }
-
-                // 4. Project Setup
-                detectedProjectTypes = SuggestGitIgnore(selectedFolder);
-                SuggestLicense(selectedFolder);
-                SuggestReadme(selectedFolder, detectedProjectTypes);
-
-                // 5. Large Files & Secrets
-                CheckLargeFiles(selectedFolder);
-                ScanSecrets(selectedFolder);
-
-                // 6. Remote URL
-                string remoteUrl = SetupRemote();
-
-                // 7. Branch Name
-                string branchName = GetUserInput("\nEnter Branch Name (default: main): ");
-                if (string.IsNullOrEmpty(branchName)) branchName = "main";
-
-                // 8. Safety Pull
-                SafetyPull(branchName);
-
-                // 9. Commit Message
-                string commitMsg = GetUserInput("\nEnter Initial Commit Message: ");
-                if (string.IsNullOrEmpty(commitMsg)) commitMsg = "Initial commit";
-
-                // 10. Summary & Push
-                PerformPush(remoteUrl, branchName, commitMsg, selectedFolder);
-
             }
             catch (Exception ex)
             {
@@ -119,6 +87,176 @@ namespace GitSync
                 Console.WriteLine("Press any key to exit...");
                 Console.ReadKey();
             }
+        }
+
+        static void HandleLocalSync()
+        {
+            // 1. Select Folder
+            LogVerbose("Waiting for user to select folder...");
+            string currentDir = AppDomain.CurrentDomain.BaseDirectory;
+            string? selectedFolder = ShowFolderSelection(currentDir);
+            if (selectedFolder == null)
+            {
+                Console.WriteLine("No folder selected. Exiting...");
+                return;
+            }
+
+            Directory.SetCurrentDirectory(selectedFolder);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine($"\nSelected Folder: {selectedFolder}");
+            Console.ResetColor();
+
+            // 2. Identity & Credentials
+            CheckGitIdentity();
+            CheckCredentialHelper();
+
+            // 3. Git Init
+            if (!Directory.Exists(".git"))
+            {
+                LogVerbose("Initializing new Git repository...");
+                RunGitWithSpinner("init");
+                gitInitialized = true;
+
+                // Rename master to main if created
+                string branch = GetCurrentBranch();
+                if (branch == "master")
+                {
+                    LogVerbose("Renaming default branch to 'main'...");
+                    RunGitWithSpinner("branch -M main");
+                }
+            }
+            else
+            {
+                LogVerbose("Git repository already exists.");
+            }
+
+            // 4. Project Setup
+            detectedProjectTypes = SuggestGitIgnore(selectedFolder);
+            SuggestLicense(selectedFolder);
+            SuggestReadme(selectedFolder, detectedProjectTypes);
+
+            // 5. Large Files & Secrets
+            CheckLargeFiles(selectedFolder);
+            ScanSecrets(selectedFolder);
+
+            // 6. Remote URL
+            string remoteUrl = SetupRemote();
+
+            // 7. Branch Name
+            string branchName = GetUserInput("\nEnter Branch Name (default: main): ");
+            if (string.IsNullOrEmpty(branchName)) branchName = "main";
+
+            // 8. Safety Pull
+            SafetyPull(branchName);
+
+            // 9. Quality Gate
+            if (!CheckQualityGates(selectedFolder)) return;
+
+            // 10. Commit Message
+            string commitMsg = GetUserInput("\nEnter Initial Commit Message: ");
+            if (string.IsNullOrEmpty(commitMsg)) commitMsg = "Initial commit";
+
+            // 11. Summary & Push
+            PerformPush(remoteUrl, branchName, commitMsg, selectedFolder);
+        }
+
+        static void HandleClone()
+        {
+            string url = GetUserInput("\nEnter Git URL to clone: ");
+            if (string.IsNullOrWhiteSpace(url)) return;
+
+            string folderName = Path.GetFileNameWithoutExtension(url);
+            if (folderName.EndsWith(".git")) folderName = folderName.Substring(0, folderName.Length - 4);
+
+            LogVerbose($"Cloning {url}...");
+            RunGitWithSpinner($"clone {url}");
+
+            string clonePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, folderName);
+            if (Directory.Exists(clonePath))
+            {
+                Directory.SetCurrentDirectory(clonePath);
+                Console.WriteLine($"\nCloned to: {clonePath}");
+
+                // Detect type
+                var types = SuggestGitIgnore(clonePath); // Reusing this for detection primarily
+                var meta = ParseProjectMetadata(clonePath, types);
+
+                Console.WriteLine($"\nDetected Project: {meta.Name}");
+
+                if (!string.IsNullOrWhiteSpace(meta.RunCommand))
+                {
+                    string setupCmd = meta.RunCommand.Split('\n')[0]; // Simple heuristic
+                    if (types.Contains("Node.js")) setupCmd = "npm install";
+                    if (types.Contains("Python")) setupCmd = "pip install -r requirements.txt";
+                    if (types.Contains("Rust")) setupCmd = "cargo build";
+                    if (types.Contains("C++")) setupCmd = "cmake .";
+
+                    string answer = GetUserInput($"\nRun setup command '{setupCmd}'? (y/n): ");
+                    if (answer.ToLower() == "y")
+                    {
+                        var parts = setupCmd.Split(' ');
+                        var exe = parts[0];
+                        var args = string.Join(" ", parts.Skip(1));
+
+                        LogVerbose($"Running {setupCmd}...");
+
+                        var psi = new ProcessStartInfo(exe, args) { UseShellExecute = true };
+                        Process.Start(psi)?.WaitForExit();
+                    }
+                }
+
+                string open = GetUserInput("\nOpen in Explorer? (y/n): ");
+                if (open.ToLower() == "y")
+                {
+                    Process.Start("explorer.exe", clonePath);
+                }
+            }
+            else
+            {
+                Console.WriteLine("Clone failed or folder not found.");
+            }
+        }
+
+        static bool CheckQualityGates(string folder)
+        {
+            Console.WriteLine("\n[Quality Gate] Checking code quality...");
+            int issues = 0;
+
+            // TODO Scanner
+            var files = Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories)
+                .Where(f => !f.Contains(".git") && new FileInfo(f).Length < 1024 * 1024); // < 1MB text files
+
+            foreach (var f in files)
+            {
+                try
+                {
+                    var lines = File.ReadLines(f);
+                    foreach (var line in lines)
+                    {
+                        if (line.Contains("TODO:") || line.Contains("FIXME:"))
+                        {
+                            issues++;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (issues > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"Found {issues} TODO/FIXME comments.");
+                Console.ResetColor();
+
+                string choice = GetUserInput("Issues found. [1] Abort, [2] Push Anyway (MASTER OVERRIDE): ");
+                if (choice == "1") return false;
+            }
+            else
+            {
+                Console.WriteLine("No TODOs found. Clean.");
+            }
+
+            return true;
         }
 
         // =================================================================================
@@ -343,6 +481,63 @@ namespace GitSync
             }
         }
 
+        static ProjectMetadata ParseProjectMetadata(string folder, List<string> types)
+        {
+            var meta = new ProjectMetadata { Name = new DirectoryInfo(folder).Name };
+
+            try
+            {
+                if (types.Contains("Node.js"))
+                {
+                    string pkg = Path.Combine(folder, "package.json");
+                    if (File.Exists(pkg))
+                    {
+                        string json = File.ReadAllText(pkg);
+                        // Simple regex parsing to avoid Json dependencies
+                        var nameMatch = Regex.Match(json, "\"name\":\\s*\"(.*?)\"");
+                        var descMatch = Regex.Match(json, "\"description\":\\s*\"(.*?)\"");
+                        var verMatch = Regex.Match(json, "\"version\":\\s*\"(.*?)\"");
+
+                        if (nameMatch.Success) meta.Name = nameMatch.Groups[1].Value;
+                        if (descMatch.Success) meta.Description = descMatch.Groups[1].Value;
+                        if (verMatch.Success) meta.Version = verMatch.Groups[1].Value;
+
+                        meta.RunCommand = "npm install\nnpm start";
+                    }
+                }
+                else if (types.Contains("Unity"))
+                {
+                    string settings = Path.Combine(folder, "ProjectSettings", "ProjectSettings.asset");
+                    if (File.Exists(settings))
+                    {
+                        string content = File.ReadAllText(settings);
+                        var nameMatch = Regex.Match(content, "productName: (.*)");
+                        if (nameMatch.Success) meta.Name = nameMatch.Groups[1].Value.Trim();
+                        meta.Description = "A Unity Game Project.";
+                        meta.RunCommand = "Open in Unity Hub";
+                    }
+                }
+                else if (types.Contains("Rust"))
+                {
+                    string cargo = Path.Combine(folder, "Cargo.toml");
+                    if (File.Exists(cargo))
+                    {
+                        string content = File.ReadAllText(cargo);
+                        var nameMatch = Regex.Match(content, "name\\s*=\\s*\"(.*?)\"");
+                        if (nameMatch.Success) meta.Name = nameMatch.Groups[1].Value;
+                        meta.RunCommand = "cargo run";
+                    }
+                }
+                else if (types.Contains("Python"))
+                {
+                    meta.RunCommand = "pip install -r requirements.txt\npython main.py";
+                }
+            }
+            catch { }
+
+            return meta;
+        }
+
         static void SuggestReadme(string folderPath, List<string> types)
         {
             if (File.Exists(Path.Combine(folderPath, "README.md"))) return;
@@ -350,17 +545,29 @@ namespace GitSync
             string choice = GetUserInput("\nCreate default README.md? (y/n): ");
             if (choice.ToLower() != "y") return;
 
-            string name = new DirectoryInfo(folderPath).Name;
-            string content = $"# {name}\n\nProject Description.\n\n## Getting Started\n";
+            // Intelligent Parsing
+            LogVerbose("Parsing project files for metadata...");
+            var meta = ParseProjectMetadata(folderPath, types);
 
-            if (types.Contains("Node.js")) content += "\n```bash\nnpm install\nnpm start\n```";
-            else if (types.Contains("Python")) content += "\n```bash\npip install -r requirements.txt\npython main.py\n```";
-            else content += "\nInstructions...";
+            string content = $"# {meta.Name} (v{meta.Version})\n\n";
+            content += $"{meta.Description}\n\n";
+            content += "## Getting Started\n\n";
+
+            if (!string.IsNullOrEmpty(meta.RunCommand))
+            {
+                content += "```bash\n" + meta.RunCommand + "\n```\n";
+            }
+            else
+            {
+                content += "Instructions on how to run the project.\n";
+            }
+
+            content += "\nGenerated by GitSync.";
 
             string path = Path.Combine(folderPath, "README.md");
             File.WriteAllText(path, content);
             createdFiles.Add(path);
-            LogVerbose("README.md created.");
+            LogVerbose($"Custom README.md created for {meta.Name}.");
         }
 
         static void CheckLargeFiles(string folderPath)
@@ -579,12 +786,6 @@ namespace GitSync
             var status = RunGit("status --short", true);
             var stagedFiles = status.Split('\n', StringSplitOptions.RemoveEmptyEntries);
             int count = stagedFiles.Length;
-
-            // Calculate total size of staged files (approximate)
-            long totalSizeBytes = 0;
-            // This is a rough estimation because 'status' doesn't give sizes directly.
-            // A more accurate way would be to enumerate files in folder again, but let's keep it simple for now.
-            // We'll skip complex size calc to avoid performance hit at the end.
 
             Console.Clear();
             Console.ForegroundColor = ConsoleColor.Cyan;
