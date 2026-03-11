@@ -18,7 +18,7 @@ namespace GitSync
         public string RunCommand { get; set; } = "";
     }
 
-    internal class Program
+    public class Program
     {
         private static string LogFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "gitsync_log.txt");
         private static HashSet<string> autoIgnoreExtensions = new HashSet<string>();
@@ -481,7 +481,7 @@ namespace GitSync
             }
         }
 
-        static ProjectMetadata ParseProjectMetadata(string folder, List<string> types)
+        public static ProjectMetadata ParseProjectMetadata(string folder, List<string> types)
         {
             var meta = new ProjectMetadata { Name = new DirectoryInfo(folder).Name };
 
