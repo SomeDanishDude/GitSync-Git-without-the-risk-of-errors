@@ -387,21 +387,41 @@ namespace GitSync
                 { "Godot", new List<string> { ".import/", "export.cfg", "export_presets.cfg" } }
             };
 
-            var detected = new List<string>();
+            var detectedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var rootInfo = new DirectoryInfo(folderPath);
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
 
-            if (Directory.GetFiles(folderPath, "*.py", SearchOption.AllDirectories).Any()) detected.Add("Python");
-            if (Directory.GetFiles(folderPath, "package.json", SearchOption.AllDirectories).Any()) detected.Add("Node.js");
-            if (Directory.GetDirectories(folderPath, "Assets", SearchOption.TopDirectoryOnly).Any()) detected.Add("Unity");
-            if (Directory.GetFiles(folderPath, "*.uproject", SearchOption.TopDirectoryOnly).Any()) detected.Add("Unreal");
-            if (Directory.GetFiles(folderPath, "*.sln", SearchOption.AllDirectories).Any()) detected.Add("VisualStudio");
-            if (Directory.GetFiles(folderPath, "pom.xml", SearchOption.AllDirectories).Any()) detected.Add("Java");
-            if (Directory.GetFiles(folderPath, "Cargo.toml", SearchOption.AllDirectories).Any()) detected.Add("Rust");
-            if (Directory.GetFiles(folderPath, "CMakeLists.txt", SearchOption.AllDirectories).Any()) detected.Add("C++");
-            if (Directory.GetFiles(folderPath, "pubspec.yaml", SearchOption.AllDirectories).Any()) detected.Add("Flutter");
-            if (Directory.GetFiles(folderPath, "go.mod", SearchOption.AllDirectories).Any()) detected.Add("Go");
-            if (Directory.GetFiles(folderPath, "Gemfile", SearchOption.AllDirectories).Any()) detected.Add("Ruby");
-            if (Directory.GetFiles(folderPath, "*.xcodeproj", SearchOption.AllDirectories).Any()) detected.Add("Swift");
-            if (Directory.GetFiles(folderPath, "project.godot", SearchOption.AllDirectories).Any()) detected.Add("Godot");
+            foreach (var info in rootInfo.EnumerateFileSystemInfos("*", options))
+            {
+                var name = info.Name;
+                var isDirectory = (info.Attributes & FileAttributes.Directory) == FileAttributes.Directory;
+                var isTopLevel = string.Equals(Path.GetDirectoryName(info.FullName)?.TrimEnd(Path.DirectorySeparatorChar), rootInfo.FullName.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+
+                if (!isDirectory)
+                {
+                    var ext = info.Extension;
+                    if (string.Equals(ext, ".py", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Python");
+                    if (string.Equals(name, "package.json", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Node.js");
+                    if (isTopLevel && string.Equals(ext, ".uproject", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Unreal");
+                    if (string.Equals(ext, ".sln", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("VisualStudio");
+                    if (string.Equals(name, "pom.xml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Java");
+                    if (string.Equals(name, "Cargo.toml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Rust");
+                    if (string.Equals(name, "CMakeLists.txt", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("C++");
+                    if (string.Equals(name, "pubspec.yaml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Flutter");
+                    if (string.Equals(name, "go.mod", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Go");
+                    if (string.Equals(name, "Gemfile", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Ruby");
+                    if (string.Equals(ext, ".xcodeproj", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Swift");
+                    if (string.Equals(name, "project.godot", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Godot");
+                }
+                else if (isTopLevel && string.Equals(name, "Assets", StringComparison.OrdinalIgnoreCase))
+                {
+                    detectedSet.Add("Unity");
+                }
+
+                if (detectedSet.Count == templates.Count) break;
+            }
+
+            var detected = detectedSet.ToList();
 
             if (detected.Count > 0)
             {
