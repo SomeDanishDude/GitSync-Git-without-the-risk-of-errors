@@ -38,9 +38,11 @@ namespace GitSync
         static void Main(string[] args)
         {
             Console.Title = "GitSync (C#)";
-            WriteColoredLine("==========================================", ConsoleColor.Cyan);
-            WriteColoredLine("   GitSync - Git but without pain added   ", ConsoleColor.Cyan);
-            WriteColoredLine("==========================================", ConsoleColor.Cyan);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("==========================================");
+            Console.WriteLine("   GitSync - Git but without pain added   ");
+            Console.WriteLine("==========================================");
+            Console.ResetColor();
 
             try
             {
@@ -78,7 +80,9 @@ namespace GitSync
             }
             catch (Exception ex)
             {
-                WriteColoredLine($"\n[ERROR] An unexpected error occurred: {ex.Message}", ConsoleColor.Red);
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"\n[ERROR] An unexpected error occurred: {ex.Message}");
+                Console.ResetColor();
                 PerformCleanup();
                 Console.WriteLine("Press any key to exit...");
                 Console.ReadKey();
@@ -98,7 +102,9 @@ namespace GitSync
             }
 
             Directory.SetCurrentDirectory(selectedFolder);
-            WriteColoredLine($"\nSelected Folder: {selectedFolder}", ConsoleColor.Cyan);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine($"\nSelected Folder: {selectedFolder}");
+            Console.ResetColor();
 
             // 2. Identity & Credentials
             CheckGitIdentity();
@@ -238,7 +244,9 @@ namespace GitSync
 
             if (issues > 0)
             {
-                WriteColoredLine($"Found {issues} TODO/FIXME comments.", ConsoleColor.Yellow);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"Found {issues} TODO/FIXME comments.");
+                Console.ResetColor();
 
                 string choice = GetUserInput("Issues found. [1] Abort, [2] Push Anyway (MASTER OVERRIDE): ");
                 if (choice == "1") return false;
@@ -260,7 +268,9 @@ namespace GitSync
             if (keepChanges) return;
             if (!gitInitialized && createdFiles.Count == 0) return;
 
-            WriteColoredLine("\n[INFO] Aborted. Cleaning up created files...", ConsoleColor.Yellow);
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("\n[INFO] Aborted. Cleaning up created files...");
+            Console.ResetColor();
 
             try
             {
@@ -301,7 +311,9 @@ namespace GitSync
                 input.Equals("exit", StringComparison.OrdinalIgnoreCase) ||
                 input.Equals("cancel", StringComparison.OrdinalIgnoreCase))
             {
-                WriteColoredLine("\nProcess Aborted by User.", ConsoleColor.Red);
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("\nProcess Aborted by User.");
+                Console.ResetColor();
                 Environment.Exit(0);
             }
             return input;
@@ -309,7 +321,9 @@ namespace GitSync
 
         static void LogVerbose(string message)
         {
-            WriteColoredLine($"[INFO] {message}", ConsoleColor.DarkGray);
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"[INFO] {message}");
+            Console.ResetColor();
         }
 
         static string? ShowFolderSelection(string path)
@@ -340,7 +354,9 @@ namespace GitSync
             string name = RunGit("config --global user.name", true);
             if (string.IsNullOrWhiteSpace(name))
             {
-                WriteColoredLine("Git user.name is not set.", ConsoleColor.Yellow);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("Git user.name is not set.");
+                Console.ResetColor();
                 string newName = GetUserInput("Enter your Name: ");
                 if (string.IsNullOrWhiteSpace(newName)) newName = "User";
                 RunGit($"config --global user.name \"{newName}\"");
@@ -349,7 +365,9 @@ namespace GitSync
             string email = RunGit("config --global user.email", true);
             if (string.IsNullOrWhiteSpace(email))
             {
-                WriteColoredLine("Git user.email is not set.", ConsoleColor.Yellow);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("Git user.email is not set.");
+                Console.ResetColor();
                 string newEmail = GetUserInput("Enter your Email: ");
                 if (string.IsNullOrWhiteSpace(newEmail)) newEmail = "user@example.com";
                 RunGit($"config --global user.email \"{newEmail}\"");
@@ -425,7 +443,9 @@ namespace GitSync
 
             if (detected.Count > 0)
             {
-                WriteColoredLine($"Detected project type(s): {string.Join(", ", detected)}", ConsoleColor.Yellow);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"Detected project type(s): {string.Join(", ", detected)}");
+                Console.ResetColor();
 
                 string choice = GetUserInput("Generate standard .gitignore? (y/n): ");
                 if (choice.ToLower() == "y")
@@ -452,7 +472,9 @@ namespace GitSync
         {
             if (File.Exists(Path.Combine(folderPath, "LICENSE"))) return;
 
-            WriteColoredLine("\nNo LICENSE file found.", ConsoleColor.Cyan);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("\nNo LICENSE file found.");
+            Console.ResetColor();
             Console.WriteLine("[1] MIT License");
             Console.WriteLine("[2] Apache License 2.0");
             Console.WriteLine("[3] GNU GPLv3");
@@ -570,7 +592,9 @@ namespace GitSync
 
         static void CheckLargeFiles(string folderPath)
         {
-            WriteColoredLine("\nScanning for large files (>100MB)...", ConsoleColor.Cyan);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("\nScanning for large files (>100MB)...");
+            Console.ResetColor();
 
             bool lfsAvailable = RunGit("lfs version", true).Contains("git-lfs");
             long limit = 100 * 1024 * 1024;
@@ -608,7 +632,9 @@ namespace GitSync
 
             if (largeFiles.Count == 0)
             {
-                WriteColoredLine("No large files found.", ConsoleColor.Green);
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("No large files found.");
+                Console.ResetColor();
                 return;
             }
 
@@ -631,7 +657,9 @@ namespace GitSync
                 if (!string.IsNullOrEmpty(RunGit($"check-ignore \"{relPath}\"", true))) continue;
 
                 double sizeMB = Math.Round(file.Length / 1024.0 / 1024.0, 2);
-                WriteColoredLine($"\n[WARNING] Large file: {relPath} ({sizeMB} MB)", ConsoleColor.Yellow);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine($"\n[WARNING] Large file: {relPath} ({sizeMB} MB)");
+                Console.ResetColor();
 
                 while (true)
                 {
@@ -672,7 +700,9 @@ namespace GitSync
 
         static void ScanSecrets(string folderPath)
         {
-            WriteColoredLine("\nScanning for secrets...", ConsoleColor.Cyan);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("\nScanning for secrets...");
+            Console.ResetColor();
 
             string[] riskWords = { "API_KEY", "SECRET", "PASSWORD", "private_key" };
             bool risksFound = false;
@@ -700,7 +730,9 @@ namespace GitSync
                         {
                             if (line.Contains(word, StringComparison.OrdinalIgnoreCase))
                             {
-                                WriteColoredLine($"[CRITICAL] Potential secret in: {Path.GetRelativePath(folderPath, f)}", ConsoleColor.Red);
+                                Console.ForegroundColor = ConsoleColor.Red;
+                                Console.WriteLine($"[CRITICAL] Potential secret in: {Path.GetRelativePath(folderPath, f)}");
+                                Console.ResetColor();
                                 risksFound = true;
                                 goto NextFile;
                             }
@@ -713,8 +745,9 @@ namespace GitSync
 
             if (risksFound)
             {
-                WriteColored("\nSecrets detected! Proceed? (yes/no): ", ConsoleColor.Red);
-                string proceed = GetUserInput("");
+                Console.ForegroundColor = ConsoleColor.Red;
+                string proceed = GetUserInput("\nSecrets detected! Proceed? (yes/no): ");
+                Console.ResetColor();
                 if (proceed != "yes") Environment.Exit(0);
                 secretsStatus = "Warning Ignored";
             }
@@ -758,7 +791,9 @@ namespace GitSync
             string check = RunGit($"ls-remote --heads origin {branch}", true);
             if (!string.IsNullOrWhiteSpace(check))
             {
-                WriteColoredLine("Remote branch found. Pulling...", ConsoleColor.Yellow);
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("Remote branch found. Pulling...");
+                Console.ResetColor();
                 RunGitWithSpinner($"pull origin {branch} --allow-unrelated-histories");
             }
         }
@@ -773,9 +808,11 @@ namespace GitSync
             int count = stagedFiles.Length;
 
             Console.Clear();
-            WriteColoredLine("==========================================", ConsoleColor.Cyan);
-            WriteColoredLine("           FINAL SUMMARY", ConsoleColor.Cyan);
-            WriteColoredLine("==========================================", ConsoleColor.Cyan);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("==========================================");
+            Console.WriteLine("           FINAL SUMMARY");
+            Console.WriteLine("==========================================");
+            Console.ResetColor();
             Console.WriteLine($"Project Type:   {string.Join(", ", detectedProjectTypes)}");
             Console.WriteLine($"Remote URL:     {remote}");
             Console.WriteLine($"Target Branch:  {branch}");
@@ -802,7 +839,9 @@ namespace GitSync
 
             if (!result.Contains("error") && !result.Contains("fatal"))
             {
-                WriteColoredLine("\nSUCCESS!", ConsoleColor.Green);
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("\nSUCCESS!");
+                Console.ResetColor();
 
                 // Mark success so cleanup doesn't run
                 keepChanges = true;
@@ -816,7 +855,9 @@ namespace GitSync
             }
             else
             {
-                WriteColoredLine("\nPush Failed.", ConsoleColor.Red);
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("\nPush Failed.");
+                Console.ResetColor();
                 Log("Failed", remote, branch);
             }
         }
@@ -883,20 +924,6 @@ namespace GitSync
                 File.AppendAllText(LogFile, msg);
             }
             catch { }
-        }
-
-        private static void WriteColoredLine(string text, ConsoleColor color)
-        {
-            Console.ForegroundColor = color;
-            Console.WriteLine(text);
-            Console.ResetColor();
-        }
-
-        private static void WriteColored(string text, ConsoleColor color)
-        {
-            Console.ForegroundColor = color;
-            Console.Write(text);
-            Console.ResetColor();
         }
     }
 }
