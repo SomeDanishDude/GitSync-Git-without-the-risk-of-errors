@@ -407,34 +407,43 @@ namespace GitSync
 
             var detectedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var rootInfo = new DirectoryInfo(folderPath);
-            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.System
+            };
 
             foreach (var info in rootInfo.EnumerateFileSystemInfos("*", options))
             {
-                var name = info.Name;
-                var isDirectory = (info.Attributes & FileAttributes.Directory) == FileAttributes.Directory;
-                var isTopLevel = string.Equals(Path.GetDirectoryName(info.FullName)?.TrimEnd(Path.DirectorySeparatorChar), rootInfo.FullName.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+                try
+                {
+                    var name = info.Name;
+                    var isDirectory = (info.Attributes & FileAttributes.Directory) == FileAttributes.Directory;
+                    var isTopLevel = string.Equals(Path.GetDirectoryName(info.FullName)?.TrimEnd(Path.DirectorySeparatorChar), rootInfo.FullName.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
 
-                if (!isDirectory)
-                {
-                    var ext = info.Extension;
-                    if (string.Equals(ext, ".py", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Python");
-                    if (string.Equals(name, "package.json", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Node.js");
-                    if (isTopLevel && string.Equals(ext, ".uproject", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Unreal");
-                    if (string.Equals(ext, ".sln", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("VisualStudio");
-                    if (string.Equals(name, "pom.xml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Java");
-                    if (string.Equals(name, "Cargo.toml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Rust");
-                    if (string.Equals(name, "CMakeLists.txt", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("C++");
-                    if (string.Equals(name, "pubspec.yaml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Flutter");
-                    if (string.Equals(name, "go.mod", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Go");
-                    if (string.Equals(name, "Gemfile", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Ruby");
-                    if (string.Equals(ext, ".xcodeproj", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Swift");
-                    if (string.Equals(name, "project.godot", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Godot");
+                    if (!isDirectory)
+                    {
+                        var ext = info.Extension;
+                        if (string.Equals(ext, ".py", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Python");
+                        if (string.Equals(name, "package.json", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Node.js");
+                        if (isTopLevel && string.Equals(ext, ".uproject", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Unreal");
+                        if (string.Equals(ext, ".sln", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("VisualStudio");
+                        if (string.Equals(name, "pom.xml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Java");
+                        if (string.Equals(name, "Cargo.toml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Rust");
+                        if (string.Equals(name, "CMakeLists.txt", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("C++");
+                        if (string.Equals(name, "pubspec.yaml", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Flutter");
+                        if (string.Equals(name, "go.mod", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Go");
+                        if (string.Equals(name, "Gemfile", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Ruby");
+                        if (string.Equals(ext, ".xcodeproj", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Swift");
+                        if (string.Equals(name, "project.godot", StringComparison.OrdinalIgnoreCase)) detectedSet.Add("Godot");
+                    }
+                    else if (isTopLevel && string.Equals(name, "Assets", StringComparison.OrdinalIgnoreCase))
+                    {
+                        detectedSet.Add("Unity");
+                    }
                 }
-                else if (isTopLevel && string.Equals(name, "Assets", StringComparison.OrdinalIgnoreCase))
-                {
-                    detectedSet.Add("Unity");
-                }
+                catch { continue; }
 
                 if (detectedSet.Count == templates.Count) break;
             }
