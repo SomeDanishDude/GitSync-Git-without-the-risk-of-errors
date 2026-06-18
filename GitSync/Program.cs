@@ -122,7 +122,7 @@ namespace GitSync
                 if (branch == "master")
                 {
                     LogVerbose("Renaming default branch to 'main'...");
-                    RunGitWithSpinner("branch -M main");
+                    RunGitWithSpinner("branch", "-M", "main");
                 }
             }
             else
@@ -169,7 +169,7 @@ namespace GitSync
             if (folderName.EndsWith(".git")) folderName = folderName.Substring(0, folderName.Length - 4);
 
             LogVerbose($"Cloning {url}...");
-            RunGitWithSpinner($"clone {url}");
+            RunGitWithSpinner("clone", url);
 
             string clonePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, folderName);
             if (Directory.Exists(clonePath))
@@ -351,7 +351,7 @@ namespace GitSync
         static void CheckGitIdentity()
         {
             LogVerbose("Checking Git configuration...");
-            string name = RunGit("config --global user.name", true);
+            string name = RunGit(true, "config", "--global", "user.name");
             if (string.IsNullOrWhiteSpace(name))
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
@@ -359,10 +359,10 @@ namespace GitSync
                 Console.ResetColor();
                 string newName = GetUserInput("Enter your Name: ");
                 if (string.IsNullOrWhiteSpace(newName)) newName = "User";
-                RunGit($"config --global user.name \"{newName}\"");
+                RunGit(false, "config", "--global", "user.name", newName);
             }
 
-            string email = RunGit("config --global user.email", true);
+            string email = RunGit(true, "config", "--global", "user.email");
             if (string.IsNullOrWhiteSpace(email))
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
@@ -370,17 +370,17 @@ namespace GitSync
                 Console.ResetColor();
                 string newEmail = GetUserInput("Enter your Email: ");
                 if (string.IsNullOrWhiteSpace(newEmail)) newEmail = "user@example.com";
-                RunGit($"config --global user.email \"{newEmail}\"");
+                RunGit(false, "config", "--global", "user.email", newEmail);
             }
         }
 
         static void CheckCredentialHelper()
         {
-            string helper = RunGit("config --global credential.helper", true);
+            string helper = RunGit(true, "config", "--global", "credential.helper");
             if (string.IsNullOrWhiteSpace(helper))
             {
                 LogVerbose("Setting credential helper to 'manager'...");
-                RunGit("config --global credential.helper manager");
+                RunGit(false, "config", "--global", "credential.helper", "manager");
             }
         }
 
@@ -490,7 +490,7 @@ namespace GitSync
             Console.WriteLine("[4] None");
 
             string choice = GetUserInput("Choice: ");
-            string author = RunGit("config --global user.name", true);
+            string author = RunGit(true, "config", "--global", "user.name");
             string year = DateTime.Now.Year.ToString();
             string content = "";
 
@@ -605,7 +605,7 @@ namespace GitSync
             Console.WriteLine("\nScanning for large files (>100MB)...");
             Console.ResetColor();
 
-            bool lfsAvailable = RunGit("lfs version", true).Contains("git-lfs");
+            bool lfsAvailable = RunGit(true, "lfs", "version").Contains("git-lfs");
             long limit = 100 * 1024 * 1024;
 
             // Gather files first to show count
@@ -663,7 +663,7 @@ namespace GitSync
                 }
 
                 // Check existing gitignore
-                if (!string.IsNullOrEmpty(RunGit($"check-ignore \"{relPath}\"", true))) continue;
+                if (!string.IsNullOrEmpty(RunGit(true, "check-ignore", relPath))) continue;
 
                 double sizeMB = Math.Round(file.Length / 1024.0 / 1024.0, 2);
                 Console.ForegroundColor = ConsoleColor.Yellow;
@@ -690,8 +690,8 @@ namespace GitSync
                     if (c == "3") break;
                     if (c == "4" && lfsAvailable)
                     {
-                        RunGitWithSpinner($"lfs track \"{relPath}\"");
-                        RunGitWithSpinner("add .gitattributes");
+                        RunGitWithSpinner("lfs", "track", relPath);
+                        RunGitWithSpinner("add", ".gitattributes");
                         lfsTrackedCount++;
                         break;
                     }
@@ -770,22 +770,22 @@ namespace GitSync
 
                 if (url.StartsWith("https://") || url.StartsWith("git@"))
                 {
-                    string existing = RunGit("remote");
+                    string existing = RunGit(false, "remote");
                     if (existing.Contains("origin"))
                     {
                         string replace = GetUserInput("Remote 'origin' exists. Replace? (y/n): ");
                         if (replace == "y")
                         {
                             LogVerbose("Replacing origin remote...");
-                            RunGit("remote remove origin");
-                            RunGit($"remote add origin {url}");
+                            RunGit(false, "remote", "remove", "origin");
+                            RunGit(false, "remote", "add", "origin", url);
                             return url;
                         }
                     }
                     else
                     {
                         LogVerbose("Adding origin remote...");
-                        RunGit($"remote add origin {url}");
+                        RunGit(false, "remote", "add", "origin", url);
                         return url;
                     }
                 }
@@ -796,23 +796,23 @@ namespace GitSync
         static void SafetyPull(string branch)
         {
             Console.WriteLine("\nChecking for remote updates...");
-            RunGit("fetch origin");
-            string check = RunGit($"ls-remote --heads origin {branch}", true);
+            RunGit(false, "fetch", "origin");
+            string check = RunGit(true, "ls-remote", "--heads", "origin", branch);
             if (!string.IsNullOrWhiteSpace(check))
             {
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine("Remote branch found. Pulling...");
                 Console.ResetColor();
-                RunGitWithSpinner($"pull origin {branch} --allow-unrelated-histories");
+                RunGitWithSpinner("pull", "origin", branch, "--allow-unrelated-histories");
             }
         }
 
         static void PerformPush(string remote, string branch, string msg, string folder)
         {
             LogVerbose("Staging all files (this may take a while)...");
-            RunGitWithSpinner("add .");
+            RunGitWithSpinner("add", ".");
 
-            var status = RunGit("status --short", true);
+            var status = RunGit(true, "status", "--short");
             var stagedFiles = status.Split('\n', StringSplitOptions.RemoveEmptyEntries);
             int count = stagedFiles.Length;
 
@@ -841,10 +841,10 @@ namespace GitSync
             }
 
             LogVerbose("Committing changes...");
-            RunGitWithSpinner($"commit -m \"{msg}\"");
+            RunGitWithSpinner("commit", "-m", msg);
 
             LogVerbose("Pushing to remote server...");
-            string result = RunGitWithSpinner($"push -u origin {branch}");
+            string result = RunGitWithSpinner("push", "-u", "origin", branch);
 
             if (!result.Contains("error") && !result.Contains("fatal"))
             {
@@ -871,9 +871,9 @@ namespace GitSync
             }
         }
 
-        static string RunGitWithSpinner(string args)
+        static string RunGitWithSpinner(params string[] args)
         {
-            var task = Task.Run(() => RunGit(args, true));
+            var task = Task.Run(() => RunGit(true, args));
             var spinner = new[] { '|', '/', '-', '\\' };
             int counter = 0;
 
@@ -888,17 +888,21 @@ namespace GitSync
             return task.Result;
         }
 
-        static string RunGit(string args, bool silent = false)
+        static string RunGit(bool silent, params string[] args)
         {
             var psi = new ProcessStartInfo
             {
                 FileName = "git",
-                Arguments = args,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+
+            foreach (var arg in args)
+            {
+                psi.ArgumentList.Add(arg);
+            }
 
             using (var p = Process.Start(psi))
             {
@@ -922,7 +926,7 @@ namespace GitSync
 
         static string GetCurrentBranch()
         {
-            return RunGit("rev-parse --abbrev-ref HEAD", true).Trim();
+            return RunGit(true, "rev-parse", "--abbrev-ref", "HEAD").Trim();
         }
 
         static void Log(string status, string remote, string branch)
