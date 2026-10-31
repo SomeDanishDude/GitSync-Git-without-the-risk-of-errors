@@ -11,13 +11,20 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- Roughly halves the exe (about 170 MB -> 72 MB), keeping it under GitHub's 100 MB file limit -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <!-- Windows Forms for Folder Dialog -->
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
-  <!-- Auto-Publish on Build -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="GitSync.Tests" />
+  </ItemGroup>
+
+  <!-- Auto-Publish on Build. ContinueOnError: when bin\SingleFile\GitSync.exe is still running (and so locked), the build
+       and the tests keep working; you only get a warning that the single-file exe wasn't refreshed. -->
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="dotnet publish &quot;$(ProjectPath)&quot; --no-build -c $(Configuration) -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o &quot;$(ProjectDir)bin\SingleFile&quot;" />
+    <Exec ContinueOnError="true" Command="dotnet publish &quot;$(ProjectPath)&quot; --no-build -c $(Configuration) -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o &quot;$(ProjectDir)bin\SingleFile&quot;" />
   </Target>
 
 </Project>
