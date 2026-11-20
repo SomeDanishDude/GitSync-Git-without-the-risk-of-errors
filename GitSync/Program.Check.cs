@@ -79,8 +79,8 @@ namespace GitSync
             "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".eggs",
             // C/C++: vcpkg's installed packages (vcpkg install brings them back), CMake's and Visual Studio's working folders
             "vcpkg_installed", "CMakeFiles", "ipch", ".vs",
-            // Java/Android, Dart, Haskell, Terraform
-            ".gradle", ".cxx", ".externalNativeBuild", ".dart_tool", ".stack-work", ".terraform",
+            // Java/Android/Kotlin, Dart, Haskell, Terraform, Jupyter's autosaves, PlatformIO's builds
+            ".gradle", ".cxx", ".externalNativeBuild", ".kotlin", ".dart_tool", ".stack-work", ".terraform", ".ipynb_checkpoints", ".pio",
             // Game engines and Xcode
             "DerivedDataCache", ".godot", ".import", "DerivedData",
         };
@@ -846,7 +846,11 @@ namespace GitSync
         static void MarkGeneratedAndIgnored(FolderCheck check)
         {
             var blocking = check.Files.Where(f => f.Kind is FileKind.Different or FileKind.OnlyHere).ToList();
-            if (blocking.Count == 0) return;
+            // Copies of GitHub's files that a build put into its output folder (data files next to the program): build output too,
+            // not "on GitHub in another place"
+            var copies = check.Files.Where(f => f.Kind is FileKind.Elsewhere or FileKind.NewerOnGitHub or FileKind.InHistory).ToList();
+            if (blocking.Count == 0 && copies.Count == 0) return;
+            var asked = blocking.Concat(copies).ToList();
 
             HashSet<string> ignored;
             string[] where;      // how git reads this project's ignore rules
@@ -856,7 +860,7 @@ namespace GitSync
                 where = new[] { "-C", check.RepoRoot };
                 toGit = check.Prefix; // the folder's place in its repository
                 var result = ExecuteGit(where.Concat(new[] { "check-ignore", "--no-index", "-z", "--stdin" }).ToArray(),
-                    silent: true, live: false, input: string.Concat(blocking.Select(f => toGit + f.Path + "\0")));
+                    silent: true, live: false, input: string.Concat(asked.Select(f => toGit + f.Path + "\0")));
                 ignored = new HashSet<string>(SplitNul(result.Output).Select(p => p.Substring(Math.Min(toGit.Length, p.Length))));
             }
             else
@@ -865,8 +869,15 @@ namespace GitSync
                 string gitDir = check.TempRepo != null && Directory.Exists(check.TempRepo) ? check.TempRepo : NewScratchRepo();
                 where = new[] { "--git-dir=" + gitDir, "--work-tree=" + check.Folder };
                 var result = ExecuteGit(where.Concat(new[] { "check-ignore", "--no-index", "-z", "--stdin" }).ToArray(),
-                    silent: true, live: false, input: string.Concat(blocking.Select(f => f.Path + "\0")));
+                    silent: true, live: false, input: string.Concat(asked.Select(f => f.Path + "\0")));
                 ignored = new HashSet<string>(SplitNul(result.Output));
+            }
+
+            foreach (var file in copies)
+            {
+                string? folder = GeneratedReason(file.Path, ignored.Contains(file.Path));
+                if (folder == null) continue;
+                (file.Kind, file.Detail) = (FileKind.Generated, folder);
             }
 
             // Files the project needs although its .gitignore leaves them out (a too-broad rule): never "build output", and
@@ -908,9 +919,35 @@ namespace GitSync
                 string name = file.Path.Substring(file.Path.LastIndexOf('/') + 1);
                 if (reason == null && shape.InSourceCMake && IsCMakeOutputName(name)) reason = "CMake's own output (it rewrites these on every build)";
                 if (self != null && string.Equals(Path.GetFullPath(full), self, StringComparison.OrdinalIgnoreCase)) reason = "GitSync itself";
+                if (reason == null && file.Ignored && IsVisualStudioUserFile(name))
+                {
+                    // Visual Studio's own settings for one person (debugging arguments and the like), kept off GitHub on purpose
+                    if (HoldsNoSettings(full)) reason = "empty Visual Studio user settings";
+                    else file.Detail = "your own Visual Studio settings for this project (e.g. debugging arguments) - kept off GitHub on purpose; copy it if you need them";
+                }
                 if (reason == null) continue;
                 file.Kind = FileKind.Generated;
                 file.Detail = reason;
+            }
+        }
+
+        // Foo.vcxproj.user, Bar.csproj.user: one person's Visual Studio settings for a project
+        static bool IsVisualStudioUserFile(string name) =>
+            Regex.IsMatch(name, @"\.(vcxproj|vcproj|csproj|vbproj|fsproj|sqlproj|wapproj|pyproj|njsproj)\.user$", RegexOptions.IgnoreCase);
+
+        // Only the empty shell ("<Project><PropertyGroup /></Project>"), as Visual Studio writes it before anything was set
+        internal static bool HoldsNoSettings(string path)
+        {
+            try
+            {
+                if (new FileInfo(path).Length > 64 * 1024) return false;
+                string text = Regex.Replace(File.ReadAllText(path), @"<!--.*?-->|<\?.*?\?>", "", RegexOptions.Singleline);
+                bool onlyShells = Regex.Matches(text, @"<([A-Za-z_][\w.:-]*)").All(m => m.Groups[1].Value is "Project" or "PropertyGroup" or "ItemGroup");
+                return onlyShells && !Regex.IsMatch(text, @">\s*[^<\s]");
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -1387,7 +1424,8 @@ namespace GitSync
             {
                 var labels = refRepos.SelectMany(c => c.Uploads.Select(u => u.Label)).ToList();
                 string what = labels.Count <= 3 ? string.Join(" and ", labels) : $"{labels.Count} branches and tags";
-                if (AskYesNo($"\nUpload {what} to GitHub now (they show up there next to your other branches)?", true))
+                string where = labels.Count == 1 ? "it shows up there next to what's already on GitHub" : "they show up there next to what's already on GitHub";
+                if (AskYesNo($"\nUpload {what} to GitHub now ({where})?", true))
                 {
                     foreach (var c in refRepos) UploadBranchesAndTags(c);
                 }
@@ -1438,12 +1476,27 @@ namespace GitSync
                 {
                     var secrets = FindSecretsInUnpushedCommits(source);
                     var large = FindLargeBlobsToPush(source);
-                    if (secrets.Count > 0 || large.Count > 0)
+                    // Key and .env files, and files over the limit: only Sync can take them out before uploading
+                    var keyFile = secrets.FirstOrDefault(s => IsSensitiveFileName(s.File.Substring(s.File.LastIndexOf('/') + 1)));
+                    if (keyFile.File != null || large.Count > 0)
                     {
-                        string why = secrets.Count > 0 ? $"a file that looks like it holds a password or key ({secrets[0].File})" : $"a file over GitHub's 100 MB limit ({large[0].Path})";
+                        string why = keyFile.File != null ? $"a file that holds passwords or keys ({keyFile.File})" : $"a file over GitHub's 100 MB limit ({large[0].Path})";
                         WriteLineColor(ConsoleColor.Yellow, $"\nNot uploaded: {label} has {why}.");
                         Console.WriteLine("Switch to it in your Git tool and run [1] Sync - it helps you take such files out before uploading.");
                         continue;
+                    }
+                    if (secrets.Count > 0)
+                    {
+                        // Something in a file's text looks like a password or key - often a false alarm (a "password" setting in
+                        // code), so the user decides after a look, like Sync's "Push anyway"
+                        WriteLineColor(ConsoleColor.Yellow, $"\n{char.ToUpper(label[0]) + label.Substring(1)} has something that looks like a password or key in:");
+                        foreach (var hits in secrets.GroupBy(s => s.File).Take(5)) Console.WriteLine($"    {hits.Key} ({hits.First().Reason})");
+                        Console.WriteLine("Anything pushed to GitHub can be seen and copied - even after you delete it again.");
+                        if (!AskYesNo("Upload it anyway (I've looked - they're safe)?", false))
+                        {
+                            Console.WriteLine($"Not uploaded. Switch to it in your Git tool and run [1] Sync - it helps you take such files out before uploading.");
+                            continue;
+                        }
                     }
                     var push = RunGitLive("push", "origin", $"{source}:{target}");
                     if (push.Success)

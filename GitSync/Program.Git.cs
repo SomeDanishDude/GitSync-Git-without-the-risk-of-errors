@@ -31,7 +31,7 @@ namespace GitSync
 
         // Absolute path of git.exe from PATH - never the current folder: CreateProcess searches the working directory
         // before PATH, so a "git.exe" inside a project or a cloned repository would otherwise run instead of the real one
-        private static readonly Lazy<string> GitExecutable = new Lazy<string>(FindGitOnPath);
+        private static Lazy<string> GitExecutable = new Lazy<string>(FindGitOnPath);
 
         static string FindGitOnPath()
         {
@@ -45,6 +45,13 @@ namespace GitSync
                     if (File.Exists(candidate)) return candidate;
                 }
                 catch { }
+            }
+            // Installed but not on this window's PATH (installed just now, or without adding itself): where Git for Windows goes
+            foreach (var folder in new[] { Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                                           Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs") })
+            {
+                string candidate = Path.Combine(folder, "Git", "cmd", "git.exe");
+                if (folder != "" && File.Exists(candidate)) return candidate;
             }
             return "git"; // not found: starting it fails and EnsureGitInstalled explains how to install Git
         }
@@ -321,9 +328,66 @@ namespace GitSync
             }
 
             WriteLineColor(ConsoleColor.Red, "\nGit is not installed (or not on PATH), so GitSync can't do anything yet.");
+            // Windows' own installer can fetch it right here, from Microsoft's package list - no download page to find
+            bool install = false;
+            try
+            {
+                install = !Console.IsInputRedirected && WingetAvailable() && AskYesNo("Install Git now with Windows' own installer (winget)? It takes a minute or two", true);
+            }
+            catch (UserAbortException) { } // "cancel" here, before any mode has started, just means no
+            if (install)
+            {
+                int exit = RunInstaller("winget", "install", "--id", "Git.Git", "-e", "--source", "winget");
+                GitExecutable = new Lazy<string>(FindGitOnPath); // found in its standard folder, even before this window's PATH knows it
+                version = RunGit(true, "--version");
+                if (version.Success)
+                {
+                    WriteLineColor(ConsoleColor.Green, $"Git is installed ({version.Output.Trim()}).");
+                    return true;
+                }
+                Console.WriteLine(exit == 0
+                    ? "The installer finished, but Git doesn't answer yet - close this window and start GitSync again."
+                    : "The installer didn't finish. Install Git from https://git-scm.com/download/win, then start GitSync again.");
+                return false;
+            }
             Console.WriteLine("Install it from https://git-scm.com/download/win");
             Console.WriteLine("(or in a terminal: winget install --id Git.Git -e), then start GitSync again.");
             return false;
+        }
+
+        static bool WingetAvailable()
+        {
+            try
+            {
+                using var p = Process.Start(new ProcessStartInfo("winget", "--version") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true });
+                if (p == null) return false;
+                if (!p.WaitForExit(10_000)) return false;
+                return p.ExitCode == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Runs an installer in this window, so its progress and any question it asks are shown; returns its exit code
+        static int RunInstaller(string program, params string[] args)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(program) { UseShellExecute = false };
+                foreach (var arg in args) psi.ArgumentList.Add(arg);
+                using var p = Process.Start(psi);
+                if (p == null) return -1;
+                p.WaitForExit();
+                Log($"{program} {string.Join(" ", args)} exited with code {p.ExitCode}");
+                return p.ExitCode;
+            }
+            catch (Exception ex)
+            {
+                Log($"{program} couldn't be started: {ex.Message}");
+                return -1;
+            }
         }
 
         // =================================================================================
@@ -704,6 +768,20 @@ namespace GitSync
             }
         }
 
+        // Before forgetting what was fetched from a repository that is gone: commits that only those copies hold get a local
+        // branch, so they aren't lost with them (and the next check offers to upload them)
+        internal static void KeepCommitsOnlyInRemoteBranches()
+        {
+            foreach (var line in RunGit(true, "for-each-ref", "--format=%(refname:strip=3)%09%(objectname)", "refs/remotes/origin/").Output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = line.Trim().Split('\t');
+                if (parts.Length < 2 || parts[0] == "HEAD") continue;
+                if (RunGit(true, "for-each-ref", "--count=1", "--contains", parts[1], "refs/heads/").Output.Trim().Length > 0) continue;
+                string name = BranchExists(parts[0]) ? parts[0] + "-from-github" : parts[0];
+                if (RunGit(true, "branch", name, parts[1]).Success) LogVerbose($"Kept the branch '{name}' - only the repository that's gone had it.");
+            }
+        }
+
         // After origin was pointed at a different repository: nothing fetched from the old one is "on the remote" any more
         static void ForgetRemoteBranches()
         {
@@ -746,6 +824,19 @@ namespace GitSync
         // Commits a push adds to <branch> on the remote. Compared with that branch when it's there - commits that already
         // sit on another remote branch (a merged feature branch) still have to go to this one. When it isn't, an old
         // origin/<branch> left from before (deleted on the remote, or a recreated repository) doesn't count.
+        // Local branches other than 'current' with commits the remote doesn't have (as far as this computer knows)
+        internal static List<(string Name, int Commits)> BranchesNotOnRemote(string current)
+        {
+            var found = new List<(string Name, int Commits)>();
+            foreach (var name in RunGit(true, "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/").Output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(n => n.Trim()))
+            {
+                if (name == current || name == "") continue;
+                var count = RunGit(true, "rev-list", "--count", "refs/heads/" + name, "--not", "--remotes=origin");
+                if (int.TryParse(count.Output.Trim(), out int n) && n > 0) found.Add((name, n));
+            }
+            return found;
+        }
+
         internal static int CountCommitsToPush(string branch, bool remoteBranchExists)
         {
             string remoteRef = $"refs/remotes/origin/{branch}";
