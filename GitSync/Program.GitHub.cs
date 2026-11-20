@@ -30,6 +30,7 @@ namespace GitSync
 
         // Swappable, so the tests can stand in for GitHub
         internal static Func<string, GitHubRepoResult> CreateGitHubRepository = CreateGitHubRepositoryWithApi;
+        internal static Func<string?> GitHubAccountName = GitHubAccountNameWithApi; // the signed-in account, or null
 
         // =================================================================================
         // Creating the project's repository on GitHub
@@ -71,6 +72,62 @@ namespace GitSync
             WriteLineColor(ConsoleColor.Yellow, $"GitHub didn't create it: {result.Error}");
             Console.WriteLine("You can create it on github.com yourself and paste its address below.");
             return null;
+        }
+
+        // A github.com address whose repository isn't there - deleted on GitHub, or never created. When the address belongs to
+        // the signed-in account, GitSync can create it again (private, empty) and upload the project to it. "Not found" also
+        // means "signed in as someone who can't see it": then the account doesn't match the address, and nothing is offered.
+        // Returns the address to use, or null to go on with the usual choices.
+        internal static string? OfferToRecreateGitHubRepository(GitResult result, string url)
+        {
+            if (!Regex.IsMatch(result.AllText, @"Repository not found|returned error: 404", RegexOptions.IgnoreCase)) return null;
+            var address = Regex.Match(url, @"^(?:https://(?:[^@/\s]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", RegexOptions.IgnoreCase);
+            if (!address.Success) return null;
+            string owner = address.Groups[1].Value, name = address.Groups[2].Value;
+            string? account = GitHubAccountName();
+            if (account == null || !account.Equals(owner, StringComparison.OrdinalIgnoreCase)) return null;
+
+            WriteLineColor(ConsoleColor.Yellow, $"\nYour GitHub account has no repository called '{name}' - it was deleted on GitHub, or never created.");
+            if (!AskYesNo($"Create '{name}' again (private) and upload this project to it?", true)) return null;
+            var created = CreateGitHubRepository(name);
+            if (created.Url == null)
+            {
+                WriteLineColor(ConsoleColor.Yellow, $"GitHub didn't create it: {created.Error}");
+                return null;
+            }
+            if (!created.AlreadyExists)
+            {
+                WriteLineColor(ConsoleColor.Green, $"Created {ToWebUrl(created.Url) ?? created.Url} again - private, so only you can see it.");
+                Log($"Created the GitHub repository {MaskUrl(created.Url)} again");
+            }
+            // What was fetched from the old repository says nothing about the new, empty one - commits only those copies hold
+            // are kept on local branches first
+            if (HasRemote("origin") && SameRepository(GetRemoteUrl(), url))
+            {
+                KeepCommitsOnlyInRemoteBranches();
+                ForgetRemoteBranches();
+            }
+            return url; // the same address again (also an SSH one stays SSH)
+        }
+
+        static string? GitHubAccountNameWithApi()
+        {
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITSYNC_TEST_GITHUB_FOLDER"))) return null; // scripted runs
+            string? signIn = GitHubSignIn();
+            string? token = signIn == null ? null : CredentialField(signIn, "password");
+            if (string.IsNullOrEmpty(token)) return null;
+            try
+            {
+                using var http = GitHubClient(token, timeoutSeconds: 15);
+                using var response = http.GetAsync($"{GitHubApi}/user").GetAwaiter().GetResult();
+                if (!response.IsSuccessStatusCode) return null;
+                using var me = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+                return me.RootElement.GetProperty("login").GetString();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // Creates a private, empty repository on the signed-in user's account through GitHub's API

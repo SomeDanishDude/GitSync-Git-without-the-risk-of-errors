@@ -240,6 +240,76 @@ namespace GitSync.Tests
         }
 
         [Fact]
+        public void ABranchWhosePasswordLookalikeIsFineCanStillBeUploaded()
+        {
+            string clone = Clone();
+            Git(clone, "checkout", "-q", "-b", "settings");
+            Write(clone, "db.cs", "var cs = \"Server=db;User Id=sa;Password=" + "S3cr3tP4ss" + ";\";\n");
+            Git(clone, "add", "db.cs");
+            Git(clone, "commit", "-q", "-m", "Settings");
+            Git(clone, "checkout", "-q", "main");
+
+            Console.SetIn(new StringReader("n\n"));
+            Program.UploadBranchesAndTags(CheckClone(clone));
+            Assert.Equal("", RunGit(remote, "branch", "--list", "settings").Trim());
+
+            Console.SetIn(new StringReader("y\n"));
+            Program.UploadBranchesAndTags(CheckClone(clone));
+            Assert.Contains("settings", RunGit(remote, "branch", "--list", "settings"));
+        }
+
+        // ---- What a build or Visual Studio leaves next to the project ----
+
+        [Fact]
+        public void CopiesABuildPutInItsOutputFolderAreBuildOutput()
+        {
+            string clone = Clone();
+            Write(clone, "bin/Debug/app.py", AppV2); // GitHub has this as src/app.py; bin/ is ignored
+
+            var check = CheckClone(clone);
+
+            Assert.Equal(FileKind.Generated, Assert.Single(check.Files, f => f.Path == "bin/Debug/app.py").Kind);
+            Assert.True(check.Safe);
+        }
+
+        [Fact]
+        public void AnEmptyVisualStudioUserFileDoesNotBlock()
+        {
+            string clone = Clone();
+            File.AppendAllText(Path.Combine(clone, ".git", "info", "exclude"), "*.user\n");
+            Write(clone, "app/Game.vcxproj.user", "﻿<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Project ToolsVersion=\"Current\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n  <PropertyGroup />\n</Project>");
+
+            var check = CheckClone(clone);
+
+            Assert.Equal(FileKind.Generated, Assert.Single(check.Files, f => f.Path == "app/Game.vcxproj.user").Kind);
+            Assert.True(check.Safe);
+        }
+
+        [Fact]
+        public void VisualStudioUserSettingsAreSaidWhatTheyAre()
+        {
+            string clone = Clone();
+            File.AppendAllText(Path.Combine(clone, ".git", "info", "exclude"), "*.user\n");
+            Write(clone, "app/Game.vcxproj.user", "<Project>\n  <PropertyGroup>\n    <LocalDebuggerCommandArguments>--dev</LocalDebuggerCommandArguments>\n  </PropertyGroup>\n</Project>\n");
+
+            var check = CheckClone(clone);
+
+            Assert.Contains("Visual Studio settings", Assert.Single(check.Files, f => f.Path == "app/Game.vcxproj.user").Detail);
+            Assert.False(check.Safe);
+        }
+
+        [Fact]
+        public void AnUnrealIconLeftOutByBuildIsFoundAsNeeded()
+        {
+            string repo = NewPlainRepo("unreal-icon", "Build/\n");
+            Write(repo, "Game.uproject", "{}\n");
+            Write(repo, "Build/Windows/Application.ico", "icon\n");
+            Write(repo, "Build/Windows/FileOpenOrder/GameOpenOrder.log", "log\n");
+
+            Assert.Equal("Build/Windows/Application.ico", Assert.Single(Program.FindIgnoredCoreFiles(repo)).Path);
+        }
+
+        [Fact]
         public void ABranchThatWentAnotherWayOnGitHubIsLeftToTheUser()
         {
             string other = Clone();

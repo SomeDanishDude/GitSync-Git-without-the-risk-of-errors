@@ -11,23 +11,32 @@ namespace GitSync
 {
     public partial class Program
     {
-        private static readonly Dictionary<string, List<string>> GitIgnoreTemplates = new Dictionary<string, List<string>>
+        internal static readonly Dictionary<string, List<string>> GitIgnoreTemplates = new Dictionary<string, List<string>>
         {
             { "Python", new List<string> { "*.pyc", "__pycache__/", "venv/", ".venv/", "env/", "*.egg-info/" } },
             { "Node.js", new List<string> { "node_modules/", "npm-debug.log", "dist/", ".env" } },
             // Anchored to the project root: Assets/ may legitimately contain folders called Library, Build, ...
             { "Unity", new List<string> { "/[Ll]ibrary/", "/[Tt]emp/", "/[Oo]bj/", "/[Bb]uild/", "/[Bb]uilds/", "/[Ll]ogs/", "/[Uu]ser[Ss]ettings/", "*.csproj", "*.sln" } },
-            { "Unreal", new List<string> { "Binaries/", "Build/", "Intermediate/", "Saved/", "DerivedDataCache/", "*.sln" } },
+            // Build/ minus what's made by hand there - the game's icons and pak blacklists (as GitHub's own Unreal template does)
+            { "Unreal", new List<string> { "Binaries/", "Build/*", "!Build/*/", "Build/*/**", "!Build/*/PakBlacklist*.txt", "!Build/**/*.ico", "Intermediate/", "Saved/", "DerivedDataCache/", "*.sln" } },
             { "VisualStudio", new List<string> { ".vs/", "bin/", "obj/", "[Dd]ebug/", "[Rr]elease/", "*.user", "*.suo", "*.pdb", "*.ipch", "TestResults/" } },
             { "Java", new List<string> { "*.class", "*.jar", "target/", ".gradle/", "build/" } },
             { "Rust", new List<string> { "target/", "**/*.rs.bk" } },
             // .vs/ and out/ are what Visual Studio's CMake / "Open Folder" mode creates (with no .sln to trigger the VisualStudio template)
             { "C++", new List<string> { "build/", "bin/", "out/", ".vs/", "*.o", "*.obj", "*.exe", "*.pdb", "*.ilk", "CMakeCache.txt", "CMakeFiles/" } },
             { "Flutter", new List<string> { ".dart_tool/", "build/", ".packages", ".pub/", "ios/Flutter/Generated.xcconfig", "android/.gradle" } },
-            { "Go", new List<string> { "bin/", "*.exe", "*.test", "vendor/" } },
+            // Not vendor/: a Go project that has one keeps it on purpose (GitHub's own template leaves that line commented out)
+            { "Go", new List<string> { "bin/", "*.exe", "*.test" } },
             { "Ruby", new List<string> { "vendor/bundle/", "log/", "tmp/", ".byebug_history" } },
             { "Swift", new List<string> { ".build/", "DerivedData/", "xcuserdata/", "*.xcuserstate" } },
-            { "Godot", new List<string> { ".godot/", ".import/", "export.cfg", "export_presets.cfg" } }
+            { "Godot", new List<string> { ".godot/", ".import/", "export.cfg", "export_presets.cfg" } },
+            // Last, so their "!" lines come after any rule they make an exception to. The Gradle wrapper's jar is needed to build:
+            // "*.jar" rules would hide it otherwise.
+            { "Gradle", new List<string> { ".gradle/", "**/build/", "!**/src/**/build/", "local.properties", ".kotlin/", ".cxx/", ".externalNativeBuild/", "captures/", "!gradle-wrapper.jar" } },
+            { "PHP", new List<string> { "/vendor/", "composer.phar" } },
+            { "Jupyter", new List<string> { ".ipynb_checkpoints/" } },
+            { "PlatformIO", new List<string> { ".pio/", ".vscode/.browse.c_cpp.db*", ".vscode/c_cpp_properties.json", ".vscode/launch.json", ".vscode/ipch" } },
+            { "LaTeX", new List<string> { "*.aux", "*.log", "*.toc", "*.out", "*.fls", "*.fdb_latexmk", "*.synctex.gz", "*.bbl", "*.blg", "*.bcf", "*.run.xml", "*.dvi", "*.xdv", "*.lof", "*.lot", "*.nav", "*.snm" } },
         };
 
         // Dependency and build output folders: huge, never contain project markers worth finding
@@ -35,7 +44,7 @@ namespace GitSync
         {
             ".git", "node_modules", "venv", ".venv", "__pycache__", "bin", "obj", "target", "build", "dist", ".gradle",
             ".vs", ".idea", "Library", "Temp", "Intermediate", "Binaries", "DerivedDataCache", "Saved", ".dart_tool",
-            "Pods", "vendor", ".godot", ".import"
+            "Pods", "vendor", ".godot", ".import", ".ipynb_checkpoints", ".pio", ".kotlin"
         };
 
         // =================================================================================
@@ -77,6 +86,12 @@ namespace GitSync
                     if (string.Equals(name, "Gemfile", StringComparison.OrdinalIgnoreCase)) detected.Add("Ruby");
                     if (string.Equals(name, "Package.swift", StringComparison.OrdinalIgnoreCase)) detected.Add("Swift");
                     if (string.Equals(name, "project.godot", StringComparison.OrdinalIgnoreCase)) detected.Add("Godot");
+                    if (new[] { "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" }.Contains(name, StringComparer.OrdinalIgnoreCase)) detected.Add("Gradle");
+                    if (string.Equals(name, "composer.json", StringComparison.OrdinalIgnoreCase)) detected.Add("PHP");
+                    if (string.Equals(ext, ".ipynb", StringComparison.OrdinalIgnoreCase)) detected.Add("Jupyter");
+                    if (string.Equals(name, "platformio.ini", StringComparison.OrdinalIgnoreCase)) detected.Add("PlatformIO");
+                    // A LaTeX document at the top - not a paper.tex somewhere in another kind of project's docs
+                    if (isTopLevel && string.Equals(ext, ".tex", StringComparison.OrdinalIgnoreCase)) detected.Add("LaTeX");
                 }
                 catch { continue; }
 
@@ -436,7 +451,8 @@ namespace GitSync
             "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "vcpkg.json",
             "vcpkg-configuration.json", "conanfile.txt", "conanfile.py", "project.godot", "Gemfile", "composer.json",
             "pubspec.yaml", "Podfile", "Package.swift", "Dockerfile", "AndroidManifest.xml", "Directory.Build.props",
-            "Directory.Build.targets", "Directory.Packages.props", "global.json",
+            "Directory.Build.targets", "Directory.Packages.props", "global.json", "gradlew", "gradlew.bat", "gradle-wrapper.jar",
+            "gradle-wrapper.properties", "platformio.ini",
         };
         private static readonly HashSet<string> CoreFileExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -448,7 +464,7 @@ namespace GitSync
             ".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ixx", ".cppm", ".cs", ".py", ".js", ".jsx",
             ".mjs", ".ts", ".tsx", ".java", ".kt", ".go", ".rs", ".swift", ".m", ".mm", ".rb", ".php", ".lua", ".gd", ".gdshader",
             ".shader", ".hlsl", ".glsl", ".vue", ".svelte", ".dart", ".scala", ".hs", ".fs", ".vb", ".sh", ".ps1", ".cmake",
-            ".proto", ".xaml", ".razor",
+            ".proto", ".xaml", ".razor", ".cu", ".cuh", ".ino", ".ipynb", ".tex",
         };
 
         // What kind of project a folder holds - it decides which of the files its .gitignore leaves out are the project's own
@@ -515,6 +531,9 @@ namespace GitSync
                 return UnityLeavesOutOnPurpose(path) ? null : "part of the Unity project";
             }
             if (shape.Unreal && new[] { "Source", "Content", "Config" }.Contains(top, StringComparer.OrdinalIgnoreCase)) return "part of the Unreal project";
+            // Build/ is mostly generated, but the game's icons and pak blacklists in it are made by hand
+            if (shape.Unreal && top.Equals("Build", StringComparison.OrdinalIgnoreCase)
+                && (ext.Equals(".ico", StringComparison.OrdinalIgnoreCase) || name.StartsWith("PakBlacklist", StringComparison.OrdinalIgnoreCase))) return "part of the Unreal project (its icon or pak list)";
             if (shape.Godot && new[] { ".gd", ".tscn", ".tres", ".gdshader", ".cs", ".godot" }.Contains(ext, StringComparer.OrdinalIgnoreCase)) return "part of the Godot project";
 
             // Anywhere but in build output: a Visual Studio or CMake build folder holds generated copies of these
@@ -780,8 +799,20 @@ namespace GitSync
             ("a Google API key", new Regex(@"\bAIza[0-9A-Za-z_\-]{35}\b")),
             ("a Stripe live key", new Regex(@"\b[rs]k_live_[0-9A-Za-z]{20,}")),
             ("an AI API key", new Regex(@"\bsk-(?:ant-|proj-)?[A-Za-z0-9_\-]{32,}")),
+            // (?![\w-]) instead of \b at the end: these tokens can end in '-', which \b doesn't see as the end of a word
+            ("a Discord bot token", new Regex(@"(?<![\w-])[MNO][A-Za-z\d_-]{22,25}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,38}(?![\w-])")),
+            ("a Discord webhook link", new Regex(@"(?i)\bdiscord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{50,}")),
+            ("a Telegram bot token", new Regex(@"(?<![\w-])\d{8,10}:[A-Za-z0-9_-]{35}(?![\w-])")),
+            ("an npm token", new Regex(@"\bnpm_[A-Za-z0-9]{36}\b|(?i)_authToken\s*=\s*([^\s$""']{8,})")),
+            ("a Hugging Face token", new Regex(@"\bhf_[A-Za-z0-9]{34,}\b")),
+            ("a GitLab token", new Regex(@"\bglpat-[A-Za-z0-9_-]{20,}")),
+            ("a SendGrid key", new Regex(@"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![\w-])")),
+            // mongodb+srv://app:Hunter2@cluster0... - the password sits right in the address
+            ("a database address with a password", new Regex(@"(?i)\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqps?|mssql|sqlserver)://(?<user>[^\s:/@""']*):([^\s@/""']+)@")),
             ("a hard-coded password or key", new Regex(@"(?i)\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\b[""']?\s*[:=]\s*[""']([^""'\s]{6,})[""']")),
-            ("a password in a connection string", new Regex(@"(?i)\b(?:password|pwd)\s*=\s*([^;""'\s]{4,})\s*;")),
+            // Only on a line that also names a server, database or user: "Server=db;User Id=sa;Password=...;" - so code such as
+            // "BOOL password = FALSE;" (a flag for "is this a password field") isn't one
+            ("a password in a connection string", new Regex(@"(?i)^(?=.*\b(?:server|data\s+source|host|address|addr|database|initial\s+catalog|user\s*id|uid|user|username|dsn)\s*=\s*[^\s;=]).*?\b(?:password|pwd)\s*=\s*([^;""'\s]{4,})\s*(?:;|[""']|$)")),
         };
 
         // "your_api_key_here", "${API_KEY}", "<password>", "changeme", ... are examples, not secrets
@@ -789,9 +820,15 @@ namespace GitSync
             @"(?i)^(your|my|example|sample|placeholder|changeme|change_me|dummy|fake|test|xxx|\*|<|\$\{|\{\{|%|todo|none|null|password|secret|process\.env|os\.environ)",
             RegexOptions.Compiled);
 
+        // The well-known passwords of local development databases and brokers (postgres:postgres, guest:guest, root:root)
+        private static readonly HashSet<string> DevelopmentDefaults = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "postgres", "root", "admin", "guest", "pass", "sa", "user", "mysql", "redis", "mongo", "rabbitmq",
+        };
+
         // Cheap first pass: a line without any of these can't match a secret pattern, so most lines skip the full check
         private static readonly Regex SecretHint = new Regex(
-            @"(?i)key|token|secret|pass|pwd|BEGIN|AKIA|ASIA|gh[pousr]_|github_pat|AIza|xox[abposr]-|[rs]k_live|sk-",
+            @"(?i)key|token|secret|pass|pwd|BEGIN|AKIA|ASIA|gh[pousr]_|github_pat|AIza|xox[abposr]-|[rs]k_live|sk-|://|npm_|hf_|glpat-|SG\.|webhooks|\d{8,10}:|(?-i:[MNO][A-Za-z\d_-]{22,25}\.)",
             RegexOptions.Compiled);
 
         internal static List<(int Line, string Kind)> FindSecrets(string text)
@@ -806,7 +843,13 @@ namespace GitSync
                 {
                     var match = pattern.Match(lines[i]);
                     if (!match.Success) continue;
-                    if (match.Groups.Count > 1 && match.Groups[1].Success && PlaceholderValue.IsMatch(match.Groups[1].Value)) continue;
+                    if (match.Groups.Count > 1 && match.Groups[1].Success)
+                    {
+                        string value = match.Groups[1].Value;
+                        if (PlaceholderValue.IsMatch(value) || DevelopmentDefaults.Contains(value)) continue;
+                        // "app:app@" - the user name repeated as the password: a local default, not a secret
+                        if (match.Groups["user"].Success && string.Equals(match.Groups["user"].Value, value, StringComparison.OrdinalIgnoreCase)) continue;
+                    }
                     hits.Add((i + 1, kind));
                     break;
                 }

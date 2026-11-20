@@ -43,6 +43,8 @@ namespace GitSync
         private static bool sessionMergeStarted = false;           // a merge GitSync started is still unfinished
         private static string? branchToRestore = null;             // the branch the user was on before GitSync switched
         private static string? branchCreatedThisSession = null;
+        // A branch moved up to the user's newest work at the branch question: Cancel moves it back while nothing was committed on it
+        private static (string Name, string From, string To)? branchMovedThisSession = null;
         private static HashSet<string> secretBlobsAccepted = new HashSet<string>(); // exact file versions the user called safe
         private static List<(string Path, string Backup)> setAsideFiles = new List<(string Path, string Backup)>(); // moved out of a merge's way
         private static string? setAsideFolder = null;
@@ -232,6 +234,7 @@ namespace GitSync
                 sessionMergeStarted = false;
                 branchToRestore = null;
                 branchCreatedThisSession = null;
+                branchMovedThisSession = null;
                 secretBlobsAccepted.Clear();
                 setAsideFiles.Clear();
                 setAsideFolder = null;
@@ -357,6 +360,12 @@ namespace GitSync
                     {
                         RunGit(true, "branch", "-D", branchCreatedThisSession);
                     }
+                    // Only while it still points where GitSync put it: a commit made on it since is kept
+                    if (branchMovedThisSession is { } moved && GetCurrentBranch() != moved.Name
+                        && RunGit(true, "update-ref", "refs/heads/" + moved.Name, moved.From, moved.To).Success)
+                    {
+                        Console.WriteLine($"'{moved.Name}' is back where it was.");
+                    }
                 });
 
                 // 5. The repository GitSync created, last
@@ -392,6 +401,7 @@ namespace GitSync
                 // Never clean the same session twice (Ctrl+C runs this, then ProcessExit runs it again)
                 gitInitialized = false;
                 branchToRestore = null;
+                branchMovedThisSession = null;
                 createdFiles.Clear();
                 modifiedFiles.Clear();
                 writtenContent.Clear();

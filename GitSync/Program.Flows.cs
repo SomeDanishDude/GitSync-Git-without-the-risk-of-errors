@@ -480,12 +480,49 @@ namespace GitSync
 
         // Switches to (or creates) a branch. A branch that only exists on the remote is checked out from there - not
         // re-created from the current branch, which would push this branch's commits into it.
-        static bool SwitchBranch(string target, ref string branch)
+        internal static bool SwitchBranch(string target, ref string branch)
         {
             string original = branch;
             GitResult result;
             if (BranchExists(target))
             {
+                // The branch typed in can be behind this one ("master" while the newest work is on "phase6"): a plain switch
+                // would put older files in the folder and upload the older version - not what "upload it to master" means
+                var (mine, theirs) = HasCommits() ? GetAheadBehind("refs/heads/" + target) : (0, 0);
+                if (mine > 0)
+                {
+                    string newest = RunGit(true, "log", "-1", "--format=%s", "HEAD").Output.Trim();
+                    WriteLineColor(ConsoleColor.Yellow, $"\n'{target}' doesn't have your last {mine} commit(s) from '{original}' (newest: \"{newest}\")"
+                        + (theirs > 0 ? $", and it has {theirs} commit(s) of its own." : "."));
+                    if (theirs == 0)
+                    {
+                        // Nothing on target that this branch lacks: it can simply move up to this commit - no file changes
+                        if (AskYesNo($"Upload your newest work to '{target}' (nothing in your folder changes)?", true))
+                        {
+                            string from = RunGit(true, "rev-parse", "refs/heads/" + target).Output.Trim();
+                            string to = RunGit(true, "rev-parse", "HEAD").Output.Trim();
+                            var move = RunGit(true, "update-ref", "-m", $"GitSync: brought up to '{original}'", "refs/heads/" + target, to, from);
+                            if (!move.Success)
+                            {
+                                ExplainGitFailure(move, $"Moving '{target}' up to your work");
+                                return false;
+                            }
+                            branchMovedThisSession = (target, from, to);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"OK - '{target}' as it is. Your {mine} newest commit(s) stay on '{original}' and aren't part of this upload.");
+                        }
+                    }
+                    else
+                    {
+                        // Both went their own way: switching hides this branch's work from the folder and the upload
+                        Console.WriteLine($"Switching shows '{target}''s files in this folder; your {mine} commit(s) stay on '{original}' and aren't part of this upload.");
+                        Console.WriteLine($"[1] Stay on '{original}' and upload it as its own branch");
+                        Console.WriteLine($"[2] Switch to '{target}' anyway");
+                        if (AskChoice("Choice: ", "1", "2") == "1") return true;
+                    }
+                }
                 // --no-overwrite-ignore: never let the other branch's files replace ignored local files such as .env
                 result = RunGit(true, "checkout", "--no-overwrite-ignore", target);
             }
@@ -555,7 +592,7 @@ namespace GitSync
             return "Update " + string.Join(", ", names);
         }
 
-        static void PrintSummary(string remote, string branch, string msg, List<string> changes)
+        internal static void PrintSummary(string remote, string branch, string msg, List<string> changes)
         {
             string local = GetCurrentBranch();
             bool onRemote = RunGit(true, "show-ref", "--verify", "--quiet", $"refs/remotes/origin/{branch}").Success;
@@ -571,15 +608,22 @@ namespace GitSync
             Console.WriteLine($"Files Ignored:  {filesIgnoredCount}");
             Console.WriteLine($"LFS Tracked:    {lfsTrackedCount}");
             Console.WriteLine($"Secrets Check:  {secretsStatus}");
-            Console.WriteLine($"Commits to Push: {(HasCommits() ? CountCommitsToPush(branch, onRemote) : 0) + 1}");
-            Console.WriteLine($"Files to Push:  {changes.Count}");
+            int commits = (HasCommits() ? CountCommitsToPush(branch, onRemote) : 0) + 1;
+            Console.WriteLine($"Commits to Push: {commits}");
+            // Commits made before this run go along too - and for a branch the remote doesn't have yet, the whole project. Only
+            // counting this run's changes said "1 file" for the first upload of a 22-commit project.
+            var pushing = !onRemote ? SplitNul(RunGit(true, "ls-files", "-z").Output)
+                : commits > 1 ? SplitNul(RunGit(true, "diff", "--cached", "--name-only", "--no-renames", "-z", $"refs/remotes/origin/{branch}").Output)
+                : changes.Select(c => c.Substring(9)).ToList();
+            Console.WriteLine(onRemote ? $"Files to Push:  {pushing.Count}" : $"Files to Push:  {pushing.Count} (all of them - '{branch}' is new on the remote)");
+            if (pushing.Count != changes.Count) Console.WriteLine($"Changed now:    {changes.Count}");
             foreach (var change in changes.Take(15)) Console.WriteLine($"    {change}");
-            if (changes.Count > 15)
+            if (changes.Count > 15) Console.WriteLine($"    ... and {changes.Count - 15} more");
+            if (pushing.Count > 15)
             {
-                Console.WriteLine($"    ... and {changes.Count - 15} more");
                 // Per-folder counts make an accidental node_modules/ or bin/ stand out before it's uploaded
                 Console.WriteLine("By folder:");
-                var folders = changes.Select(c => c.Substring(9))
+                var folders = pushing
                     .GroupBy(p => p.Contains('/') ? p.Substring(0, p.IndexOf('/') + 1) : "(top level)")
                     .OrderByDescending(g => g.Count())
                     .Take(8);
@@ -756,6 +800,13 @@ namespace GitSync
 
                 quiet = false;
                 ExplainGitFailure(probe, "Connecting to the remote");
+                // Before "sign in again": that can't help when the signed-in account's own repository is gone
+                string? recreated = OfferToRecreateGitHubRepository(probe, url);
+                if (recreated != null)
+                {
+                    url = recreated;
+                    continue;
+                }
                 if (OfferSignInAgain(probe, url)) continue;
                 if (OfferSafeDirectoryFor(probe)) continue;
                 string? https = HttpsAlternativeFor(probe, url);
@@ -808,6 +859,12 @@ namespace GitSync
         static bool HandleRemoteProblem(GitResult result, ref string branch)
         {
             string url = GetRemoteUrl();
+            string? recreated = OfferToRecreateGitHubRepository(result, url);
+            if (recreated != null)
+            {
+                SaveRemote(recreated);
+                return true;
+            }
             if (OfferSignInAgain(result, url)) return true;
             if (OfferSafeDirectoryFor(result)) return true;
             if (OfferHttpsInsteadOfSsh(result, url)) return true;
@@ -1999,6 +2056,17 @@ namespace GitSync
                 }
             }
 
+            // "Up to date" is about this branch only: other branches, and changes put aside with "git stash", can exist only here
+            if (HasRemote("origin"))
+            {
+                foreach (var (other, count) in BranchesNotOnRemote(branch))
+                {
+                    WriteLineColor(ConsoleColor.Yellow, $"The branch '{other}' has {count} commit(s) that aren't on the remote - [5] Safe to delete? can upload it.");
+                }
+            }
+            int stashes = RunGit(true, "stash", "list").Output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+            if (stashes > 0) WriteLineColor(ConsoleColor.Yellow, (stashes == 1 ? "1 set" : $"{stashes} sets") + " of changes put aside with 'git stash' - only on this computer.");
+
             var changes = GetWorkingTreeChanges();
             if (changes.Count == 0)
             {
@@ -2224,6 +2292,7 @@ namespace GitSync
             if (types.Contains("Flutter") && Has("pubspec.yaml")) return "flutter pub get";
             if (types.Contains("Ruby") && Has("Gemfile")) return "bundle install";
             if (types.Contains("Java") && Has("pom.xml")) return "mvn install -DskipTests";
+            if (types.Contains("PHP") && Has("composer.json")) return "composer install";
             if (types.Contains("C++") && Has("CMakeLists.txt")) return "cmake -S . -B build";
             return null;
         }
