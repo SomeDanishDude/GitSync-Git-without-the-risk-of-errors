@@ -522,6 +522,71 @@ namespace GitSync.Tests
             Assert.True(File.Exists(Path.Combine(b, ".git", "MERGE_HEAD")));
         }
 
+        [Theory]
+        [InlineData(true)]  // a real merge (Sync always commits first): git replaced the file without a word
+        [InlineData(false)] // a fast-forward: git refused to run at all, so the pull could never finish
+        public void IntegrateRemote_NeverOverwritesAnIgnoredFileTheRemoteStartedTracking(bool localCommit)
+        {
+            var (remote, a, b) = TwoComputersWhereBCommitsAnEnv(".env content from B\n", "MY_KEY=local-secret\n");
+            if (localCommit) Commit(a, "notes.txt", "changed on A\n", "A edit");
+            Directory.SetCurrentDirectory(a);
+
+            string branch = "main";
+            Assert.True(Program.IntegrateRemote(ref branch, out _, out _));
+
+            string backup = Directory.GetFiles(Path.Combine(a, ".gitsync-backup"), ".env", SearchOption.AllDirectories).Single();
+            Assert.Equal("MY_KEY=local-secret\n", File.ReadAllText(backup));
+            Assert.Contains("content from B", File.ReadAllText(Path.Combine(a, ".env")));
+            // The copies are never offered for a commit
+            Assert.DoesNotContain(".gitsync-backup", GitOut(a, "status", "--porcelain", "--untracked-files=all"));
+        }
+
+        [Fact]
+        public void IntegrateRemote_CancelledMergePutsTheSetAsideFileBack()
+        {
+            var (remote, a, b) = TwoComputersWhereBCommitsAnEnv(".env content from B\n", "MY_KEY=local-secret\n");
+            Commit(b, "notes.txt", "changed on B\n", "B edit");
+            Git(b, "push", "-q", "origin", "main");
+            Commit(a, "notes.txt", "changed on A\n", "A edit");
+            Directory.SetCurrentDirectory(a);
+            Console.SetIn(new StringReader("5\n")); // [5] Cancel the merge
+
+            string branch = "main";
+            Assert.False(Program.IntegrateRemote(ref branch, out _, out _));
+
+            Assert.Equal("MY_KEY=local-secret\n", File.ReadAllText(Path.Combine(a, ".env")));
+            Assert.False(Directory.Exists(Path.Combine(a, ".gitsync-backup")));
+            Assert.False(File.Exists(Path.Combine(a, ".git", "MERGE_HEAD")));
+        }
+
+        [Fact]
+        public void IntegrateRemote_DropsTheCopyWhenTheRemoteBroughtTheSameFile()
+        {
+            var (remote, a, b) = TwoComputersWhereBCommitsAnEnv("SAME=1\n", "SAME=1\n");
+            Commit(a, "notes.txt", "changed on A\n", "A edit");
+            Directory.SetCurrentDirectory(a);
+
+            string branch = "main";
+            Assert.True(Program.IntegrateRemote(ref branch, out _, out _));
+
+            Assert.Contains("SAME=1", File.ReadAllText(Path.Combine(a, ".env")));
+            Assert.False(Directory.Exists(Path.Combine(a, ".gitsync-backup")));
+        }
+
+        // A ignores .env (a local rule, like a global gitignore) and has its own; B commits one with "git add -f" and pushes
+        private (string Remote, string A, string B) TwoComputersWhereBCommitsAnEnv(string fromB, string onA)
+        {
+            var (remote, a, b) = TwoComputers("notes.txt", "v1\n");
+            Directory.CreateDirectory(Path.Combine(a, ".git", "info"));
+            File.AppendAllText(Path.Combine(a, ".git", "info", "exclude"), "\n.env\n");
+            File.WriteAllText(Path.Combine(a, ".env"), onA);
+            File.WriteAllText(Path.Combine(b, ".env"), fromB);
+            Git(b, "add", "-f", ".env");
+            Git(b, "commit", "-q", "-m", "B commits .env");
+            Git(b, "push", "-q", "origin", "main");
+            return (remote, a, b);
+        }
+
         [Fact]
         public void IntegrateRemote_KeepMineOfAReadmeWithAHeadingUnderlineAsksNothingMore()
         {

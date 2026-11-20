@@ -11,7 +11,8 @@ project — with safety checks first, and plain-language explanations when somet
 | **[2] Pull Latest Changes** | Brings a repository up to date. Uncommitted work is committed first, so nothing gets overwritten; local commits can be pushed right after. |
 | **[3] Clone & Setup** | Clones a repository into a folder you choose and offers the matching setup command (`npm install`, `pip install -r requirements.txt`, `dotnet restore`, `cargo build`, ...). |
 | **[4] Status** | "Am I up to date?" — branch, last commit, commits waiting on the remote or not pushed yet, and uncommitted files. |
-| **[5] Open Log File** | Every git command GitSync ran, with its full output — useful when you want to know what happened last time. |
+| **[5] Safe to delete?** | Compares a folder with its GitHub repository, file by file, and gives a clear verdict: SAFE TO DELETE, or NOT SAFE with exactly what would be lost and what to do about it. Only reads the folder. |
+| **[6] Open Log File** | Every git command GitSync ran, with its full output — useful when you want to know what happened last time. |
 
 - A daily Sync of a project that is already on GitHub asks almost nothing: pick the folder, type what you changed,
   confirm. The branch and remote questions only come up the first time.
@@ -21,6 +22,8 @@ project — with safety checks first, and plain-language explanations when somet
   creating a second branch that GitHub doesn't show. A branch that is linked to a differently named remote branch
   (e.g. made with `git checkout -b work origin/main`) is asked about once, and the answer is remembered.
 - It checks the remote URL before using it, and asks before joining two unrelated projects (e.g. a pasted wrong URL).
+- A file that only lives on your computer (ignored, like `.env`) is never overwritten when the remote starts tracking a
+  file with the same name: your copy is moved to `.gitsync-backup\` first, and GitSync tells you where it is.
 - A file or secret that has to stay out of commits that aren't pushed yet is taken out by rebuilding only those
   commits - never anything that is already on the remote, and never on top of work a teammate pushed meanwhile.
 - Typing `abort`, `cancel` or `exit` at any prompt cancels the current step and puts the folder back the way it was.
@@ -28,6 +31,25 @@ project — with safety checks first, and plain-language explanations when somet
 - If a push fails you can try again, keep everything for later, switch to a different remote URL, or undo what
   GitSync did to a brand-new repository.
 - Recent folders are offered first (Enter = the latest one). You can also drag a folder onto `GitSync.exe`.
+
+## Before you delete a folder: [5] Safe to delete?
+
+Pick the folder; GitSync works out the rest and only asks what it can't tell by itself (the GitHub address of a folder
+that isn't linked to GitHub). It downloads what GitHub has into a temporary folder and compares every file:
+
+- **On GitHub:** identical files (also when only Windows/Linux line endings differ), files GitHub has a *newer* version of,
+  and files that moved to another folder, name or branch there.
+- **Not on GitHub:** edited and new files, ignored files such as `.env` (save passwords and keys in a password manager),
+  commits on any branch that were never pushed, stashes, tags, unfinished merges, other work folders using the
+  repository, your own Git hook scripts, and large (Git LFS) files whose upload never happened.
+- **Doesn't count:** build output and downloaded packages (`node_modules`, an ignored `bin/`...), which building recreates.
+- Works for a clone, a copy or ZIP download without `.git` (also inside a `project-main\` wrapper folder), part of a
+  project, a folder holding several projects (each checked against its own GitHub repository), and Git LFS files — which
+  it downloads once to prove they were really uploaded.
+
+When something is missing, GitSync offers only the steps that fit — upload the missing large files, the branches and
+tags GitHub doesn't have yet (after the same password and size checks Sync makes), or the changes with Sync — and then
+checks again. It never deletes anything itself: move the folder to the Recycle Bin, so you can still get it back.
 
 ## Requirements
 

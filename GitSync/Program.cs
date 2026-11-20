@@ -45,6 +45,8 @@ namespace GitSync
         private static string? branchToRestore = null;             // the branch the user was on before GitSync switched
         private static string? branchCreatedThisSession = null;
         private static HashSet<string> secretBlobsAccepted = new HashSet<string>(); // exact file versions the user called safe
+        private static List<(string Path, string Backup)> setAsideFiles = new List<(string Path, string Backup)>(); // moved out of a merge's way
+        private static string? setAsideFolder = null;
 
         // Track statistics for summary
         private static int filesIgnoredCount = 0;
@@ -54,6 +56,13 @@ namespace GitSync
 
         // Folder given on the command line (or dropped onto GitSync.exe); offered first in the folder picker
         private static string? startupFolder = null;
+
+        // A step GitSync suggested and the user accepted (e.g. the check's "upload what's missing, then check again"): it
+        // runs right after the current mode, on the same folder, without asking for the folder again
+        private static readonly Queue<(string Name, Action Mode, string Folder, Func<bool>? OnlyIf)> queuedModes = new Queue<(string Name, Action Mode, string Folder, Func<bool>? OnlyIf)>();
+        private static string? preselectedFolder = null;
+        private static string? suggestedRemoteUrl = null; // an address the user already gave, so Sync doesn't ask for it again
+        private static int successfulPushes = 0;          // counts up with every push that uploaded something
 
         // Log and recent-folder list live in %LOCALAPPDATA%\GitSync (GITSYNC_DATA_DIR overrides it)
         private static string DataDir
@@ -109,8 +118,9 @@ namespace GitSync
                 Console.WriteLine("[2] Pull Latest Changes");
                 Console.WriteLine("[3] Clone & Setup (Startup)");
                 Console.WriteLine("[4] Status (am I up to date?)");
-                Console.WriteLine("[5] Open Log File");
-                Console.WriteLine("[6] Exit");
+                Console.WriteLine("[5] Safe to delete? (is everything in a folder on GitHub?)");
+                Console.WriteLine("[6] Open Log File");
+                Console.WriteLine("[7] Exit");
 
                 string choice;
                 try
@@ -126,13 +136,35 @@ namespace GitSync
                 else if (choice == "2") RunMode("Pull", HandlePull);
                 else if (choice == "3") RunMode("Clone", HandleClone);
                 else if (choice == "4") RunMode("Status", HandleStatus);
-                else if (choice == "5") OpenLogFile();
-                else if (choice == "6") return;
-                else if (choice != "") Console.WriteLine("Please choose 1-6.");
+                else if (choice == "5") RunMode("Check", HandleSafeToDelete);
+                else if (choice == "6") OpenLogFile();
+                else if (choice == "7") return;
+                else if (choice != "") Console.WriteLine("Please choose 1-7.");
+                RunQueuedModes();
             }
         }
 
+        static void QueueMode(string name, Action mode, string folder, Func<bool>? onlyIf)
+        {
+            queuedModes.Enqueue((name, mode, folder, onlyIf));
+        }
+
+        static void RunQueuedModes()
+        {
+            while (queuedModes.Count > 0)
+            {
+                var (name, mode, folder, onlyIf) = queuedModes.Dequeue();
+                if (onlyIf != null && !onlyIf()) continue;
+                preselectedFolder = folder;
+                suggestedRemoteUrl = null; // an address meant for one step never reaches the next one
+                RunMode(name, mode);
+                preselectedFolder = null;
+            }
+            suggestedRemoteUrl = null;
+        }
+
         // Runs one menu mode. Errors and aborts end the mode (after cleanup) and return to the menu instead of closing the window.
+        // A cancelled or failed mode also drops the steps that were queued to follow it.
         static void RunMode(string name, Action mode)
         {
             ResetSession();
@@ -145,11 +177,13 @@ namespace GitSync
             {
                 WriteLineColor(ConsoleColor.Red, $"\n{ex.Message.Trim()}");
                 Log($"{name}: {ex.Message.Trim()}");
+                queuedModes.Clear();
             }
             catch (Exception ex)
             {
                 WriteLineColor(ConsoleColor.Red, $"\n[ERROR] An unexpected error occurred: {ex.Message}");
                 Log($"{name}: unexpected error: {ex}");
+                queuedModes.Clear();
             }
             finally
             {
@@ -180,6 +214,8 @@ namespace GitSync
                 branchToRestore = null;
                 branchCreatedThisSession = null;
                 secretBlobsAccepted.Clear();
+                setAsideFiles.Clear();
+                setAsideFolder = null;
                 autoIgnoreExtensions.Clear();
                 filesIgnoredCount = 0;
                 lfsTrackedCount = 0;
@@ -222,6 +258,8 @@ namespace GitSync
                     }
                     sessionMergeStarted = false;
                 });
+                // Files moved out of that merge's way go back (or the user is told where they are)
+                CleanupStep(SettleSetAsideFiles);
 
                 // 2. Undo our staging in an existing repository - only while nothing has moved on since the backup, otherwise
                 //    an old index would quietly undo a merge or a commit. This runs even when the work is kept: if HEAD
@@ -687,6 +725,13 @@ namespace GitSync
         // Offers recent folders first (Enter = the latest one); "B" or no history opens the folder dialog.
         static string? PickFolder(string description)
         {
+            if (preselectedFolder != null && Directory.Exists(preselectedFolder))
+            {
+                string chosen = preselectedFolder;
+                preselectedFolder = null;
+                return chosen;
+            }
+
             var recent = LoadRecentFolders();
             if (startupFolder != null)
             {
