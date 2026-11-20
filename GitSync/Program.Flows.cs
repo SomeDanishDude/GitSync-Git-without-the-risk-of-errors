@@ -250,28 +250,39 @@ namespace GitSync
                 || broad.Any(b => b.Length > 0 && string.Equals(full, b.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase));
         }
 
+        // Where files that were in a merge's way are kept (see SetAsideFilesInTheWay)
+        const string BackupFolderName = ".gitsync-backup";
+
         // Things that must never be uploaded with the project (.git/info/exclude is local-only): a GitSync.exe copied into
-        // it, and old repository folders GitSync moved aside (.git-broken-..., a kept LFS backup, a half-deleted .git)
+        // it, old repository folders GitSync moved aside (.git-broken-..., a kept LFS backup, a half-deleted .git), and the
+        // folder with copies of files a merge would have replaced
         static void ExcludeLocalOnlyFiles()
         {
             try
             {
                 if (sessionFolder == null) return;
-                var entries = new List<string> { "/.git-broken-*/", "/.git-gitsync-backup-*/", "/.git.gitsync-delete-*/" };
+                var entries = new List<string> { "/.git-broken-*/", "/.git-gitsync-backup-*/", "/.git.gitsync-delete-*/", $"/{BackupFolderName}/" };
                 string? exe = Environment.ProcessPath;
                 string rel = exe != null ? Path.GetRelativePath(sessionFolder, exe) : "..";
                 bool exeInside = !rel.StartsWith("..") && !Path.IsPathRooted(rel);
                 if (exeInside) entries.Add(ToGitIgnoreEntry(rel));
 
-                string exclude = GetGitPath("info/exclude");
-                var existing = File.Exists(exclude) ? File.ReadAllLines(exclude).Select(l => l.Trim()).ToHashSet() : new HashSet<string>();
-                var missing = entries.Where(e => !existing.Contains(e)).ToList();
-                if (missing.Count == 0) return;
-                Directory.CreateDirectory(Path.GetDirectoryName(exclude)!);
-                File.AppendAllText(exclude, Environment.NewLine + string.Join(Environment.NewLine, missing) + Environment.NewLine);
-                if (exeInside && missing.Contains(ToGitIgnoreEntry(rel))) LogVerbose($"{rel} is GitSync itself, so it won't be uploaded.");
+                var added = AddToInfoExclude(entries);
+                if (exeInside && added.Contains(ToGitIgnoreEntry(rel))) LogVerbose($"{rel} is GitSync itself, so it won't be uploaded.");
             }
             catch { }
+        }
+
+        // Adds the entries that aren't in .git/info/exclude yet (ignore rules like .gitignore's, but never uploaded). Returns those.
+        static List<string> AddToInfoExclude(List<string> entries)
+        {
+            string exclude = GetGitPath("info/exclude");
+            var existing = File.Exists(exclude) ? File.ReadAllLines(exclude).Select(l => l.Trim()).ToHashSet() : new HashSet<string>();
+            var missing = entries.Where(e => !existing.Contains(e)).ToList();
+            if (missing.Count == 0) return missing;
+            Directory.CreateDirectory(Path.GetDirectoryName(exclude)!);
+            File.AppendAllText(exclude, Environment.NewLine + string.Join(Environment.NewLine, missing) + Environment.NewLine);
+            return missing;
         }
 
         // Full path of a file inside the repository's git folder (info/exclude, info/attributes) - also right for worktrees
@@ -540,6 +551,16 @@ namespace GitSync
                         break;
                     }
                 }
+            }
+
+            // The address the user already gave (to the safe-to-delete check): not asked for twice
+            if (suggestedRemoteUrl != null && !askForNewUrl)
+            {
+                string suggested = suggestedRemoteUrl;
+                suggestedRemoteUrl = null;
+                WriteLineColor(ConsoleColor.Cyan, $"\nGitHub address: {MaskUrl(suggested)}");
+                string? working = VerifyRemoteAccess(suggested, quiet: true);
+                if (working != null) return SaveRemote(working);
             }
 
             while (true)
@@ -840,9 +861,21 @@ namespace GitSync
 
             if (unrelated && !LooksLikeFreshRemote(remoteRef))
             {
-                // Not just GitHub's starter README/LICENSE: most likely the URL of a different project was pasted
-                int remoteFiles = RunGit(true, "ls-tree", "-r", "--name-only", remoteRef).Output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
-                WriteLineColor(ConsoleColor.Yellow, $"\nThe remote already holds a different project ({remoteFiles} file(s)) that has nothing in common with this folder.");
+                // Not just GitHub's starter README/LICENSE: the URL of a different project - or this folder is a copy of the
+                // remote's project that was made without Git (a ZIP download), so the two histories never met
+                var remoteFiles = SplitNul(RunGit(true, "ls-tree", "-r", "--name-only", "-z", remoteRef).Output);
+                var localFiles = new HashSet<string>(SplitNul(RunGit(true, "ls-tree", "-r", "--name-only", "-z", "HEAD").Output), StringComparer.OrdinalIgnoreCase);
+                int shared = remoteFiles.Count(localFiles.Contains);
+                if (shared == 0)
+                {
+                    WriteLineColor(ConsoleColor.Yellow, $"\nThe remote already holds a different project ({remoteFiles.Count} file(s)) that has nothing in common with this folder.");
+                }
+                else
+                {
+                    WriteLineColor(ConsoleColor.Yellow, $"\nThe remote already holds a project ({remoteFiles.Count} file(s)) with its own, separate history.");
+                    Console.WriteLine($"{shared} of its files have the same names as files here - maybe this folder is a copy of it (for example a ZIP download).");
+                    Console.WriteLine("Merging joins the two: files that differ are shown to you, and you choose which version to keep.");
+                }
                 Console.WriteLine("[1] Merge the two projects into one");
                 Console.WriteLine("[2] Use a different remote URL");
                 Console.WriteLine("[3] Cancel");
@@ -870,8 +903,12 @@ namespace GitSync
                 ? "The remote repository was started separately (e.g. with a README on GitHub), so the two histories are joined."
                 : "Merging them in...");
 
-            // Merge explicitly instead of "git pull", so the result doesn't depend on pull.rebase/pull.ff settings.
-            // --no-overwrite-ignore: never let incoming files silently replace ignored local files such as .env
+            // Ignored local files (a .env, say) where the remote now has a file of the same name: moved out of the way
+            // first, because a real merge would replace them without a word - --no-overwrite-ignore only works for a
+            // fast-forward, which instead refuses to run at all
+            if (!SetAsideFilesInTheWay(remoteRef)) return false;
+
+            // Merge explicitly instead of "git pull", so the result doesn't depend on pull.rebase/pull.ff settings
             var args = new List<string> { "merge", "--no-edit", "--no-stat", "--no-overwrite-ignore" };
             if (unrelated) args.Add("--allow-unrelated-histories");
             args.Add(remoteRef);
@@ -886,11 +923,18 @@ namespace GitSync
                 {
                     sessionMergeStarted = IsMergeInProgress();
                     ExplainGitFailure(merge, "Merging the remote changes", outputAlreadyShown: true);
+                    if (!sessionMergeStarted) SettleSetAsideFiles(); // otherwise cleanup does, after cancelling the merge
                     return false;
                 }
-                if (!ResolveConflictsAndCommit(startedHere: true)) return false;
+                if (!ResolveConflictsAndCommit(startedHere: true))
+                {
+                    // Cancelled: AbortMerge settled them already. Left unfinished by the user: the remote's files stay in place.
+                    if (!sessionMergeStarted) SettleSetAsideFiles();
+                    return false;
+                }
             }
             sessionMergeStarted = false;
+            SettleSetAsideFiles();
 
             remoteMerged = true;
             keepChanges = true;
@@ -1133,6 +1177,118 @@ namespace GitSync
             sessionMergeStarted = false;
             if (abort.Success) WriteLineColor(ConsoleColor.Yellow, "Merge cancelled - your files are back to how they were before it.");
             else ExplainGitFailure(abort, "Cancelling the merge");
+            SettleSetAsideFiles();
+        }
+
+        // Local files that aren't in Git (ignored, like .env) at a path where the remote has a file this branch doesn't: the
+        // merge would put the remote's file there. Each is moved into .gitsync-backup\<time>\ first, so nothing can be lost;
+        // SettleSetAsideFiles puts it back afterwards wherever its place is still free. False if one couldn't be moved.
+        internal static bool SetAsideFilesInTheWay(string remoteRef)
+        {
+            // Two-dot diff of the two trees: also right for joining unrelated histories, which have no common ancestor
+            var incoming = SplitNul(RunGit(true, "diff", "--no-renames", "--name-only", "--diff-filter=A", "-z", "HEAD", remoteRef).Output);
+            if (incoming.Count == 0) return true;
+            var tracked = GetTrackedFiles();
+            var inTheWay = incoming.Where(p => !tracked.Contains(p) && File.Exists(p)).ToList();
+            if (inTheWay.Count == 0) return true;
+
+            string folder = Path.GetFullPath(Path.Combine(BackupFolderName, DateTime.Now.ToString("yyyyMMdd-HHmmss")));
+            for (int n = 2; Directory.Exists(folder); n++) folder = Path.GetFullPath(Path.Combine(BackupFolderName, $"{DateTime.Now:yyyyMMdd-HHmmss}-{n}"));
+            try { AddToInfoExclude(new List<string> { $"/{BackupFolderName}/" }); } catch { } // the copies must never be committed
+            setAsideFolder = folder;
+
+            foreach (var path in inTheWay)
+            {
+                string backup = Path.Combine(folder, path.Replace('/', Path.DirectorySeparatorChar));
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(backup)!);
+                    try
+                    {
+                        File.Move(path, backup);
+                    }
+                    catch (IOException)
+                    {
+                        File.Copy(path, backup); // open in another program: a copy at least (git can't replace it then either)
+                    }
+                    setAsideFiles.Add((Path.GetFullPath(path), backup));
+                }
+                catch (Exception ex)
+                {
+                    WriteLineColor(ConsoleColor.Red, $"\nCouldn't make a safety copy of {path} ({ex.Message}) - the merge would replace it with the remote's version.");
+                    Console.WriteLine("Close the program that has it open, then run GitSync again. Nothing was merged.");
+                    SettleSetAsideFiles();
+                    return false;
+                }
+            }
+            Log($"Set aside {inTheWay.Count} local file(s) the merge would replace: {string.Join(", ", inTheWay.Take(20))}");
+            return true;
+        }
+
+        // After a merge finished or was cancelled: every set-aside file goes back to its place if that is free, and is
+        // dropped if the merge brought exactly the same content. The rest stay in the backup folder, and the user is told.
+        static void SettleSetAsideFiles()
+        {
+            if (setAsideFolder == null) return;
+            var kept = new List<string>();
+            foreach (var (path, backup) in setAsideFiles)
+            {
+                try
+                {
+                    if (!File.Exists(backup)) continue;
+                    if (!File.Exists(path) && !Directory.Exists(path))
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                        File.Move(backup, path);
+                    }
+                    else if (File.Exists(path) && SameContent(File.ReadAllBytes(path), File.ReadAllBytes(backup)))
+                    {
+                        File.Delete(backup);
+                    }
+                    else
+                    {
+                        kept.Add(Path.GetRelativePath(sessionFolder ?? Environment.CurrentDirectory, path));
+                    }
+                }
+                catch
+                {
+                    kept.Add(path);
+                }
+            }
+
+            string folder = setAsideFolder;
+            setAsideFiles.Clear();
+            setAsideFolder = null;
+            DeleteEmptyFolders(folder);
+            DeleteEmptyFolders(Path.GetDirectoryName(folder)!); // .gitsync-backup itself, when nothing else is in it
+            if (kept.Count == 0) return;
+
+            WriteLineColor(ConsoleColor.Yellow, "\nThe remote has its own version of these files, which you also had here (ignored by Git, so yours were never uploaded):");
+            foreach (var f in kept.Take(10)) Console.WriteLine($"    {f}");
+            if (kept.Count > 10) Console.WriteLine($"    ... and {kept.Count - 10} more");
+            WriteLineColor(ConsoleColor.Yellow, $"Your own copies are kept in {folder} - nothing was lost.");
+            Console.WriteLine("To use yours again, copy it back. It's part of the project now, so the next Sync would upload your version.");
+            Log($"Kept local copies of {string.Join(", ", kept.Take(20))} in {folder}");
+        }
+
+        // The same file, also when one copy has Windows line endings (git's autocrlf) - but only for text
+        internal static bool SameContent(byte[] a, byte[] b)
+        {
+            if (a.AsSpan().SequenceEqual(b)) return true;
+            if (Array.IndexOf(a, (byte)0) >= 0 || Array.IndexOf(b, (byte)0) >= 0) return false;
+            static byte[] Lf(byte[] x) => System.Text.Encoding.Latin1.GetBytes(System.Text.Encoding.Latin1.GetString(x).Replace("\r\n", "\n"));
+            return Lf(a).AsSpan().SequenceEqual(Lf(b));
+        }
+
+        static void DeleteEmptyFolders(string folder)
+        {
+            try
+            {
+                if (!Directory.Exists(folder)) return;
+                foreach (var sub in Directory.GetDirectories(folder)) DeleteEmptyFolders(sub);
+                if (!Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder);
+            }
+            catch { }
         }
 
         static string DescribeConflict(string file)
@@ -1263,6 +1419,7 @@ namespace GitSync
                     }
 
                     WriteLineColor(ConsoleColor.Green, "\nSUCCESS!");
+                    successfulPushes++;
                     FixDanglingRemoteHead(remote, branch);
                     string? webUrl = ToWebUrl(remote);
                     if (webUrl != null)

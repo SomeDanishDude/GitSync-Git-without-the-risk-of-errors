@@ -728,10 +728,11 @@ namespace GitSync
         // Secrets inside commits that haven't been pushed yet - including commits made outside GitSync (VS Code, plain git)
         // and files that were changed or deleted again since. The folder scan can't see those, but the push would publish
         // them. Only content that isn't on the remote already is read. One hit per flagged version (Blob) of a file.
-        internal static List<(string File, string Blob, string Reason)> FindSecretsInUnpushedCommits()
+        // tip: the branch or tag whose commits are checked (the checked-out branch unless told otherwise)
+        internal static List<(string File, string Blob, string Reason)> FindSecretsInUnpushedCommits(string tip = "HEAD")
         {
             var flagged = new List<(string File, string Blob, string Reason)>();
-            var objects = RunGit(true, "rev-list", "--objects", "HEAD", "--not", "--remotes=origin");
+            var objects = RunGit(true, "rev-list", "--objects", tip, "--not", "--remotes=origin");
             if (!objects.Success || objects.Output.Trim().Length == 0) return flagged;
 
             var info = ExecuteGit(new[] { "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)" }, silent: true, live: false, input: objects.Output);

@@ -368,6 +368,9 @@ namespace GitSync
                 "git config --global http.sslBackend schannel"),
             (RejectedNonFastForward,
                 "The remote has commits that you don't have yet. They have to be merged in before you can push."),
+            (new Regex(@"pack exceeds maximum allowed size", RegexOptions.IgnoreCase),
+                "The upload is bigger than GitHub accepts in one push (2 GB). Keep big generated folders (builds, caches, " +
+                "downloaded packages) out with .gitignore, or track large assets such as videos with Git LFS, then Sync again."),
             (new Regex(@"GH001|exceeds GitHub's file size limit|Large files detected", RegexOptions.IgnoreCase),
                 "A file over 100 MB is inside the commits you're pushing, and GitHub refuses it. Deleting it in a new commit isn't " +
                 "enough (the old commit still has it) - run Sync again and GitSync offers to move it into Git LFS."),
@@ -870,9 +873,9 @@ namespace GitSync
 
         // Files over GitHub's 100 MiB limit inside commits that haven't been pushed yet. GitHub rejects the whole push for
         // one of these, and deleting the file in a later commit doesn't help because the earlier commit still holds it.
-        static List<(string Path, long Size)> FindLargeBlobsToPush()
+        static List<(string Path, long Size)> FindLargeBlobsToPush(string tip = "HEAD")
         {
-            var objects = RunGit(true, "rev-list", "--objects", "HEAD", "--not", "--remotes=origin");
+            var objects = RunGit(true, "rev-list", "--objects", tip, "--not", "--remotes=origin");
             if (!objects.Success || objects.Output.Trim().Length == 0) return new List<(string Path, long Size)>();
 
             var sizes = ExecuteGit(new[] { "cat-file", "--batch-check=%(objecttype) %(objectsize) %(rest)" }, silent: true, live: false, input: objects.Output);
