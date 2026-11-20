@@ -61,8 +61,9 @@ that isn't linked to GitHub). It downloads what GitHub has into a temporary fold
   commits on any branch that were never pushed, stashes, tags, unfinished merges, other work folders using the
   repository, your own Git hook scripts, and large (Git LFS) files whose upload never happened.
 - **Doesn't count:** build output and downloaded packages (`node_modules`, `vcpkg_installed`, CMake's and CLion's build
-  folders, an ignored `bin/`...), also the data files a build copies into them, and an empty Visual Studio
-  `.vcxproj.user` - all recreated by building or installing. Long lists are summed up by folder.
+  folders, an ignored `bin/`...), also the data files a build copies into them, caches, temporary files and logs your
+  `.gitignore` leaves out, and an empty Visual Studio `.vcxproj.user` - all made or fetched again. Long lists are summed
+  up by folder; the screen shows three lines (on GitHub, nothing to lose, NOT on GitHub), the saved report every file.
 - **Flagged separately:** files the project needs that its `.gitignore` leaves out (so they were never uploaded), with
   the rule that does it — Sync then offers to upload them.
 - Works for a clone, a copy or ZIP download without `.git` (also inside a `project-main\` wrapper folder), part of a
@@ -71,7 +72,11 @@ that isn't linked to GitHub). It downloads what GitHub has into a temporary fold
 
 When something is missing, GitSync offers only the steps that fit — upload the missing large files, the branches and
 tags GitHub doesn't have yet (after the same password and size checks Sync makes), or the changes with Sync — and then
-checks again. It never deletes anything itself: move the folder to the Recycle Bin, so you can still get it back.
+checks again. Files no upload takes (left out by your `.gitignore` on purpose, passwords and keys, your own Git hooks)
+are one question: **keep a copy** (a ZIP in `Documents\GitSync\Saved files`, opened again to make sure every file is in
+it) — or say no, and they're not needed (never for passwords and keys). The answer is remembered for exactly those file
+versions, outside the folder: a file that changes later is asked about again. Anything GitSync can't fix itself says in
+one line what to do. It never deletes anything itself: move the folder to the Recycle Bin, so you can still get it back.
 
 ## Requirements
 

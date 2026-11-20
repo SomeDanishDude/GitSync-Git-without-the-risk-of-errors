@@ -23,6 +23,8 @@ namespace GitSync.Tests
             Directory.CreateDirectory(root);
             Console.SetOut(new StringWriter());
             Program.ResetSession();
+            // Kept copies go here, not into the real Documents folder
+            Environment.SetEnvironmentVariable("GITSYNC_SAVE_DIR", Path.Combine(root, "saved"));
 
             // GitHub: a README, ignore rules, and src/app.py in two versions
             remote = Path.Combine(root, "remote.git");
@@ -44,6 +46,7 @@ namespace GitSync.Tests
 
         public void Dispose()
         {
+            Environment.SetEnvironmentVariable("GITSYNC_SAVE_DIR", null);
             Program.DeleteCheckTempRepos();
             Program.ResetSession();
             Directory.SetCurrentDirectory(originalDirectory);
@@ -343,8 +346,12 @@ namespace GitSync.Tests
             File.WriteAllText(Path.Combine(hooks, "pre-commit"), "#!/bin/sh\necho checking my code\n");
             var check = CheckClone(clone);
 
+            // A file like any other that never goes to GitHub: listed, and a copy can be kept
             Assert.False(check.Safe);
-            Assert.Contains(check.Problems, p => p.Text.Contains("pre-commit"));
+            Assert.Equal(FileKind.OnlyHere, Kind(check, ".git/hooks/pre-commit"));
+            Console.SetIn(new StringReader("\n"));
+            Program.OfferNextStep(check);
+            Assert.True(check.Safe);
         }
 
         [Fact]
@@ -383,7 +390,7 @@ namespace GitSync.Tests
             var check = CheckClone(clone);
 
             Assert.False(check.Safe);
-            Assert.Contains(check.Problems, p => p.Text.Contains("git stash"));
+            Assert.Contains(check.Problems, p => p.Text.Contains("git stash") && p.Text.Contains("Source Control")); // and what to do about it
         }
 
         [Fact]
@@ -689,6 +696,172 @@ namespace GitSync.Tests
             Write(repo, ".gitignore", gitignore);
             return repo;
         }
+
+        // ---- Files no upload takes: one question, then the verdict ----
+
+        [Fact]
+        public void CachesTempFilesAndLogsLeftOutByGitignoreAreLeftovers()
+        {
+            string clone = Clone();
+            IgnoreHere(clone, "graphify-out/\n*.log\n.tmp/\n");
+            Write(clone, "graphify-out/cache/abc.json", "{}\n");
+            Write(clone, "graphify-out/graph.json", "{\"nodes\":[]}\n");
+            Write(clone, "debug.log", "started\n");
+            Write(clone, ".tmp/scratch.bin", "x\n");
+
+            var check = CheckClone(clone);
+
+            Assert.Equal(FileKind.Generated, Kind(check, "graphify-out/cache/abc.json"));
+            Assert.Equal(FileKind.Generated, Kind(check, "debug.log"));
+            Assert.Equal(FileKind.Generated, Kind(check, ".tmp/scratch.bin"));
+            Assert.Equal(FileKind.OnlyHere, Kind(check, "graphify-out/graph.json")); // a tool's output is asked about, never guessed
+        }
+
+        [Fact]
+        public void KeepingACopyMakesItSafeWithoutChangingTheFolder()
+        {
+            string clone = Clone();
+            IgnoreHere(clone, "graphify-out/\n");
+            Write(clone, "graphify-out/graph.json", "{\"nodes\":[1,2,3]}\n");
+            Write(clone, "graphify-out/GRAPH_REPORT.md", "# Report\n");
+            string before = Fingerprint(clone);
+            var check = CheckClone(clone);
+            Assert.False(check.Safe);
+
+            Console.SetIn(new StringReader("\n")); // Enter = keep a copy
+            Program.OfferNextStep(check);
+
+            Assert.True(check.Safe);
+            string zip = Assert.Single(Directory.GetFiles(Path.Combine(root, "saved"), "*.zip"));
+            using (var archive = System.IO.Compression.ZipFile.OpenRead(zip))
+            {
+                Assert.Equal(new[] { "graphify-out/GRAPH_REPORT.md", "graphify-out/graph.json" }, archive.Entries.Select(e => e.FullName).OrderBy(n => n, StringComparer.Ordinal));
+            }
+            Program.DeleteCheckTempRepos();
+            Assert.Equal(before, Fingerprint(clone)); // the copy went elsewhere: nothing in the folder changed
+            Assert.True(CheckClone(clone).Safe);      // and the next check knows about it
+
+            Write(clone, "graphify-out/graph.json", "{\"nodes\":[1,2,3,4]}\n");
+            Assert.False(CheckClone(clone).Safe);     // changed since the copy was made: this version isn't in it
+        }
+
+        [Fact]
+        public void NotNeededIsRememberedUntilSomethingChanges()
+        {
+            string clone = Clone();
+            IgnoreHere(clone, "renders/\n");
+            Write(clone, "renders/intro.txt", "frame data\n");
+            var check = CheckClone(clone);
+
+            Console.SetIn(new StringReader("n\n"));
+            Program.OfferNextStep(check);
+
+            Assert.True(check.Safe);
+            Assert.False(Directory.Exists(Path.Combine(root, "saved")) && Directory.GetFiles(Path.Combine(root, "saved")).Length > 0);
+            Assert.True(CheckClone(clone).Safe); // still safe on the next run
+
+            Write(clone, "renders/outro.txt", "new frames\n");
+            Assert.False(CheckClone(clone).Safe); // something new there: asked again
+        }
+
+        [Fact]
+        public void PasswordFilesAreNeverJustNotNeeded()
+        {
+            string clone = Clone(); // GitHub's .gitignore leaves out .env
+            IgnoreHere(clone, "renders/\n");
+            Write(clone, ".env", "API_KEY=" + "abc123secret\n");
+            Write(clone, "renders/intro.txt", "frame data\n");
+            var check = CheckClone(clone);
+
+            Console.SetIn(new StringReader("n\n"));
+            Program.OfferNextStep(check);
+
+            Assert.Equal(FileKind.NotNeeded, Kind(check, "renders/intro.txt"));
+            Assert.Equal(FileKind.OnlyHere, Kind(check, ".env"));
+            Assert.False(check.Safe);
+            Assert.False(CheckClone(clone).Safe);
+        }
+
+        [Fact]
+        public void APasswordFileCanBeKeptInTheCopy()
+        {
+            string clone = Clone();
+            Write(clone, ".env", "API_KEY=" + "abc123secret\n");
+            var check = CheckClone(clone);
+
+            Console.SetIn(new StringReader("\n"));
+            Program.OfferNextStep(check);
+
+            Assert.True(check.Safe);
+            Assert.Equal(FileKind.Saved, Kind(check, ".env"));
+        }
+
+        [Fact]
+        public void AnEditToAFileGitHubHasIsNeverJustNotNeeded()
+        {
+            // src/app.py is on GitHub; a rule added later matches it, and it was edited here
+            string clone = Clone();
+            IgnoreHere(clone, "src/app.py\n");
+            Write(clone, "src/app.py", "print('edited here')\n");
+            var check = CheckClone(clone);
+            Assert.Equal(FileKind.Different, Kind(check, "src/app.py"));
+
+            Console.SetIn(new StringReader("n\n"));
+            Program.OfferNextStep(check);
+
+            Assert.False(check.Safe);
+            Assert.False(CheckClone(clone).Safe);
+
+            Console.SetIn(new StringReader("\n")); // a copy, though, is fine
+            Program.OfferNextStep(check);
+            Assert.True(check.Safe);
+        }
+
+        [Fact]
+        public void ACopyKeepsNamesWithDanishLetters()
+        {
+            string clone = Clone();
+            IgnoreHere(clone, "renders/\n");
+            Write(clone, "renders/Ærø intro - første.txt", "frame data\n");
+            var check = CheckClone(clone);
+
+            Console.SetIn(new StringReader("\n"));
+            Program.OfferNextStep(check);
+
+            Assert.True(check.Safe);
+            using var archive = System.IO.Compression.ZipFile.OpenRead(Assert.Single(Directory.GetFiles(Path.Combine(root, "saved"), "*.zip")));
+            Assert.Equal("renders/Ærø intro - første.txt", Assert.Single(archive.Entries).FullName);
+        }
+
+        [Fact]
+        public void ACopyIsNeverPutInsideTheFolderBeingChecked()
+        {
+            string clone = Clone();
+            Environment.SetEnvironmentVariable("GITSYNC_SAVE_DIR", Path.Combine(clone, "backup"));
+            IgnoreHere(clone, "renders/\n");
+            Write(clone, "renders/intro.txt", "frame data\n");
+            var check = CheckClone(clone);
+            Console.SetIn(new StringReader("")); // nothing may be asked
+
+            Program.OfferNextStep(check);
+
+            Assert.False(check.Safe);
+            Assert.False(Directory.Exists(Path.Combine(clone, "backup")));
+        }
+
+        [Fact]
+        public void AFolderInsideAnotherIsCountedWithIt()
+        {
+            var files = Enumerable.Range(0, 58).Select(i => new CheckedFile { Path = $"graphify-out/cache/{i}.json", Kind = FileKind.OnlyHere, Ignored = true, Size = 1024 })
+                .Concat(Enumerable.Range(0, 8).Select(i => new CheckedFile { Path = $"graphify-out/f{i}.json", Kind = FileKind.OnlyHere, Ignored = true, Size = 1024 }))
+                .ToList();
+
+            Assert.Equal("    graphify-out/  (66 files, 66 KB, left out by .gitignore)", Assert.Single(Program.DescribeFiles(files, 15)));
+        }
+
+        private static void IgnoreHere(string clone, string rules) => File.AppendAllText(Path.Combine(clone, ".git", "info", "exclude"), rules);
+
+        private static FileKind Kind(FolderCheck check, string path) => Assert.Single(check.Files, f => f.Path == path).Kind;
 
         // ---- The check only reads ----
 
