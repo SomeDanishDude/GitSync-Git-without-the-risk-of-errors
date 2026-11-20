@@ -1,0 +1,20 @@
+# Runs all of GitSync's tests on every pull request and on every change to master, on Windows with real git
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Run the tests
+        run: dotnet test --configuration Release

@@ -21,6 +21,9 @@ namespace GitSync.Tests
 
             // "[4] I'll fix them myself" and friends must not open Explorer windows during a test run
             Environment.SetEnvironmentVariable("GITSYNC_NO_WINDOWS", "1");
+
+            // No asking GitHub for a newer GitSync from the tests
+            Environment.SetEnvironmentVariable("GITSYNC_NO_UPDATE_CHECK", "1");
         }
     }
 }
