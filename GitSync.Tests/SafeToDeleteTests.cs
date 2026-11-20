@@ -797,6 +797,43 @@ namespace GitSync.Tests
         }
 
         [Fact]
+        public void AnEditToAFileGitHubHasIsNeverJustNotNeeded()
+        {
+            // src/app.py is on GitHub; a rule added later matches it, and it was edited here
+            string clone = Clone();
+            IgnoreHere(clone, "src/app.py\n");
+            Write(clone, "src/app.py", "print('edited here')\n");
+            var check = CheckClone(clone);
+            Assert.Equal(FileKind.Different, Kind(check, "src/app.py"));
+
+            Console.SetIn(new StringReader("n\n"));
+            Program.OfferNextStep(check);
+
+            Assert.False(check.Safe);
+            Assert.False(CheckClone(clone).Safe);
+
+            Console.SetIn(new StringReader("\n")); // a copy, though, is fine
+            Program.OfferNextStep(check);
+            Assert.True(check.Safe);
+        }
+
+        [Fact]
+        public void ACopyKeepsNamesWithDanishLetters()
+        {
+            string clone = Clone();
+            IgnoreHere(clone, "renders/\n");
+            Write(clone, "renders/Ærø intro - første.txt", "frame data\n");
+            var check = CheckClone(clone);
+
+            Console.SetIn(new StringReader("\n"));
+            Program.OfferNextStep(check);
+
+            Assert.True(check.Safe);
+            using var archive = System.IO.Compression.ZipFile.OpenRead(Assert.Single(Directory.GetFiles(Path.Combine(root, "saved"), "*.zip")));
+            Assert.Equal("renders/Ærø intro - første.txt", Assert.Single(archive.Entries).FullName);
+        }
+
+        [Fact]
         public void ACopyIsNeverPutInsideTheFolderBeingChecked()
         {
             string clone = Clone();

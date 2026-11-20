@@ -235,6 +235,10 @@ namespace GitSync
                 // Git writes UTF-8; without this, æøå in file names and messages come out garbled
                 StandardOutputEncoding = Utf8NoBom,
                 StandardErrorEncoding = Utf8NoBom,
+                // ...and reads file names given on stdin (check-ignore --stdin, --pathspec-from-file) as UTF-8 too. Otherwise
+                // they'd go out in the console's code page - UTF-8 only after GitSync switched the console, which older Windows
+                // can't - and a name with æøå would quietly not match. No BOM: it would be read as part of the first name.
+                StandardInputEncoding = Utf8NoBom,
             };
 
             // Show non-ASCII file names as-is instead of "\303\246" escapes

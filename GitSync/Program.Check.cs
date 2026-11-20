@@ -166,8 +166,14 @@ namespace GitSync
                 var check = CheckFolder(folder, url, repoRoot, prefix);
                 ConfirmLfsUploads(check);
                 PrintCheckReport(check);
-                SaveCheckReport(check);
-                OfferNextStep(check);
+                try
+                {
+                    OfferNextStep(check);
+                }
+                finally
+                {
+                    SaveCheckReport(check); // after the answers: the saved list also shows what was kept or called not needed
+                }
             }
             finally
             {
@@ -697,7 +703,7 @@ namespace GitSync
                 catch (Exception ex)
                 {
                     file.Kind = FileKind.Unreadable;
-                    file.Detail = ex.Message;
+                    file.Detail = $"couldn't be read, so it couldn't be checked: {ex.Message}";
                 }
 
                 done++;
@@ -1448,6 +1454,10 @@ namespace GitSync
             }
             if (all.Any(c => c.Problems.Any(p => p.Fix == ProblemFix.Upload) && !CanUploadTo(c))) todo.Add("Upload the branches and tags with your Git tool (this repository's own GitHub address is a different one), or keep the folder.");
             if (blocking.Any(f => f.Kind == FileKind.Unreadable)) todo.Add("Close programs that have files open here, then check again.");
+            if (all.Any(c => c.Files.Any(f => f.Kind == FileKind.LfsMissing) && !CanUploadTo(c)))
+            {
+                todo.Add("Upload the missing large files from the project's own Git folder (in a terminal there: git lfs push --all origin), or keep this folder.");
+            }
             var keep = all.SelectMany(c => c.Files.Where(IsKeepCandidate)).ToList();
             if (keep.Count > 0 && CopyFolderFor(root.Folder) == null) todo.Add($"Copy the {keep.Count} file(s) that won't go to GitHub somewhere outside this folder, if you still need them.");
             if (full)
@@ -1487,7 +1497,7 @@ namespace GitSync
                 string name = string.Concat(Path.GetFileName(check.Folder.TrimEnd('\\')).Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
                 string file = Path.Combine(dir, $"{(name == "" ? "drive" : name)}-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
                 File.WriteAllLines(file, BuildCheckReport(check, full: true).Select(l => l.Text));
-                WriteLineColor(ConsoleColor.DarkGray, $"The full list is saved in {file}");
+                WriteLineColor(ConsoleColor.DarkGray, $"\n(The full list is saved in {file})");
                 Log($"Safe-to-delete check of {check.Folder}: {(check.Safe ? "safe" : check.HasBlockers ? "not safe" : "not confirmed")} - {file}");
             }
             catch { }
@@ -1598,12 +1608,21 @@ namespace GitSync
                 Ignored = k.File.Ignored, Detail = IsSecretFile(k.File) ? "holds passwords or keys" : k.File.Detail
             }).ToList();
 
-            WriteLineColor(ConsoleColor.Yellow, $"\n{keep.Count} file(s) here won't go to GitHub - they're left out on purpose:");
-            foreach (var line in DescribeFiles(shown, 5)) Console.WriteLine(line);
+            // Listed right above already when they're all that's missing: not twice
+            bool listedAbove = keep.Count == root.All().Sum(c => c.Files.Count(f => f.Blocks));
+            WriteLineColor(ConsoleColor.Yellow, $"\n{(listedAbove ? "These" : keep.Count.ToString())} file(s) won't go to GitHub - they're left out on purpose{(listedAbove ? "." : ":")}");
+            if (!listedAbove) foreach (var line in DescribeFiles(shown, 5)) Console.WriteLine(line);
             Console.WriteLine(secrets.Count == keep.Count
                 ? $"Passwords and keys don't belong on GitHub. GitSync can keep a copy of them in {folder}."
                 : $"Not needed? Then they can go with the folder. If you want them, GitSync keeps a copy in {folder}.");
-            if (secrets.Count > 0) Console.WriteLine($"(The copy holds {string.Join(", ", secrets.Take(2).Select(s => s.File.Path))} with passwords or keys - keep it private.)");
+            if (secrets.Count > 0)
+            {
+                // Documents is often inside OneDrive: then a copy with passwords in it goes to the cloud as well
+                bool synced = new[] { "OneDrive", "OneDriveConsumer", "OneDriveCommercial" }.Select(Environment.GetEnvironmentVariable)
+                    .Any(d => !string.IsNullOrEmpty(d) && folder.StartsWith(d.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+                Console.WriteLine($"(The copy holds {string.Join(", ", secrets.Take(2).Select(s => s.File.Path))} with passwords or keys - keep it private"
+                    + (synced ? "; that folder is synced by OneDrive, so the copy goes to the cloud too.)" : ".)"));
+            }
 
             if (AskYesNo($"Keep a copy ({FormatSize(bytes)})?", true))
             {
@@ -1613,9 +1632,11 @@ namespace GitSync
                 return true;
             }
 
-            // "Not needed" - remembered for exactly these versions: a file changed (or added) since is asked about again
+            // "Not needed" - only for files that were never uploaded and aren't passwords: an edit to a file GitHub has (an older
+            // version of) is never answered away. Remembered for exactly these versions: one changed or added since is asked again.
             var answers = new List<(string Path, FileAnswer Answer)>();
-            foreach (var (c, f) in keep.Where(k => !IsSecretFile(k.File)))
+            var stays = keep.Where(k => !CanBeNotNeeded(k.File)).ToList();
+            foreach (var (c, f) in keep.Where(k => CanBeNotNeeded(k.File)))
             {
                 string full = FullPathOf(c, f);
                 try
@@ -1629,11 +1650,21 @@ namespace GitSync
             }
             SaveAnswers(answers);
             if (answers.Count > 0) Log($"Not needed ({root.Folder}): {answers.Count} file(s)");
-            Console.WriteLine(secrets.Count > 0
-                ? $"OK - the rest can go with the folder. Keep {string.Join(", ", secrets.Take(2).Select(s => s.File.Path))} somewhere safe (a password manager), or keep the folder."
-                : "OK - they can go with the folder. (GitSync remembers that, as long as they don't change.)");
+            if (stays.Count == 0)
+            {
+                Console.WriteLine("OK - they can go with the folder. (GitSync remembers that, as long as they don't change.)");
+            }
+            else
+            {
+                string names = string.Join(", ", stays.Take(3).Select(s => s.File.Path)) + (stays.Count > 3 ? $" and {stays.Count - 3} more" : "");
+                Console.WriteLine((answers.Count > 0 ? "OK - the rest can go with the folder. " : "OK. ")
+                    + $"Keep {names} somewhere safe ({(stays.Any(s => IsSecretFile(s.File)) ? "passwords in a password manager" : "they were changed here")}), or keep the folder.");
+            }
             return answers.Count > 0;
         }
+
+        // Never uploaded, and not a password or key: only such a file can be "not needed"
+        static bool CanBeNotNeeded(CheckedFile f) => f.Kind == FileKind.OnlyHere && !IsSecretFile(f);
 
         // A ZIP of the files, outside the checked folder - reopened afterwards: only a complete copy counts
         static string? SaveCopy(FolderCheck root, List<(FolderCheck Check, CheckedFile File)> keep, string folder)
@@ -1734,7 +1765,7 @@ namespace GitSync
                 }
                 catch { continue; }
                 if (answer.Kind == "saved" && File.Exists(answer.Zip)) (file.Kind, file.Detail, file.SavedIn) = (FileKind.Saved, $"in {answer.Zip}", answer.Zip);
-                else if (answer.Kind == "notneeded" && !IsSecretFile(file)) (file.Kind, file.Detail) = (FileKind.NotNeeded, "you said it isn't needed");
+                else if (answer.Kind == "notneeded" && CanBeNotNeeded(file)) (file.Kind, file.Detail) = (FileKind.NotNeeded, "you said it isn't needed");
             }
         }
 
