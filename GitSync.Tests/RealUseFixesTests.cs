@@ -204,6 +204,12 @@ namespace GitSync.Tests
         [InlineData("amqp://guest:guest@localhost:5672/")]
         [InlineData("REDIS_URL=redis://:${REDIS_PASSWORD}@cache:6379")]
         [InlineData("//registry.npmjs.org/:_authToken=${NPM_TOKEN}")]
+        [InlineData("conn = psycopg2.connect(host=DB_HOST, user=DB_USER, password=DB_PASSWORD)")]
+        [InlineData("$dsn = \"pgsql:host=$host;dbname=$db;user=$user;password=$password\";")]
+        [InlineData("var cs = $\"Server={s};User Id={u};Password={pw}\";")]
+        [InlineData("url = f\"postgresql://{user}:{password}@{host}/{db}\"")]
+        [InlineData("MONGO=mongodb://$MONGO_USER:$MONGO_PASS@mongo:27017")]
+        [InlineData("postgres://postgres:[YOUR-PASSWORD]@db.example.co:5432/postgres")]
         public void CodeThatOnlyTalksAboutPasswordsIsNotASecret(string line)
         {
             Assert.Empty(Program.FindSecrets(line));
@@ -312,16 +318,48 @@ namespace GitSync.Tests
         // ---- A repository that was deleted on GitHub ----
 
         [Fact]
-        public void YourOwnDeletedRepositoryCanBeCreatedAgain()
+        public void YourOwnDeletedRepositoryIsCreatedAgainWithOneEnter()
         {
+            string repo = PhaseRepo();
+            Git(repo, "remote", "add", "origin", "https://github.com/me/Space-Sim.git");
             string? asked = null;
             Program.GitHubAccountName = () => "me";
             Program.CreateGitHubRepository = name => { asked = name; return new GitHubRepoResult { Url = $"https://github.com/me/{name}.git" }; };
-            Console.SetIn(new StringReader("y\n"));
+            Console.SetIn(new StringReader("\n"));
             var notFound = new GitResult { ExitCode = 128, Error = "remote: Repository not found.\nfatal: repository 'https://github.com/me/Space-Sim.git/' not found" };
 
             Assert.Equal("https://github.com/me/Space-Sim.git", Program.OfferToRecreateGitHubRepository(notFound, "https://github.com/me/Space-Sim.git"));
             Assert.Equal("Space-Sim", asked);
+        }
+
+        [Fact]
+        public void AJustTypedAddressThatIsntThereIsOnlyCreatedWhenAskedFor()
+        {
+            string repo = PhaseRepo(); // no GitHub address yet: "Spel-Checker" was typed in
+            bool created = false;
+            Program.GitHubAccountName = () => "me";
+            Program.CreateGitHubRepository = name => { created = true; return new GitHubRepoResult { Url = $"https://github.com/me/{name}.git" }; };
+            var notFound = new GitResult { ExitCode = 128, Error = "remote: Repository not found." };
+
+            Console.SetIn(new StringReader("\n")); // Enter = no: probably a typo
+            Assert.Null(Program.OfferToRecreateGitHubRepository(notFound, "https://github.com/me/Spel-Checker.git"));
+            Assert.False(created);
+            Assert.Contains("typo", output.ToString());
+
+            Console.SetIn(new StringReader("y\n"));
+            Assert.NotNull(Program.OfferToRecreateGitHubRepository(notFound, "https://github.com/me/Spel-Checker.git"));
+            Assert.True(created);
+        }
+
+        [Fact]
+        public void AVisualStudioUserFileWithASettingInItIsNotEmpty()
+        {
+            // A setting can sit in an element of its own, with no text in it
+            string dir = Path.Combine(root, "vs-user");
+            Write(dir, "a.vcxproj.user", "<Project>\n  <PropertyGroup />\n</Project>\n");
+            Write(dir, "b.vcxproj.user", "<Project>\n  <PropertyGroup>\n    <DebuggerFlavor Value=\"WindowsLocalDebugger\" />\n  </PropertyGroup>\n</Project>\n");
+            Assert.True(Program.HoldsNoSettings(Path.Combine(dir, "a.vcxproj.user")));
+            Assert.False(Program.HoldsNoSettings(Path.Combine(dir, "b.vcxproj.user")));
         }
 
         [Fact]

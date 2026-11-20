@@ -87,8 +87,18 @@ namespace GitSync
             string? account = GitHubAccountName();
             if (account == null || !account.Equals(owner, StringComparison.OrdinalIgnoreCase)) return null;
 
-            WriteLineColor(ConsoleColor.Yellow, $"\nYour GitHub account has no repository called '{name}' - it was deleted on GitHub, or never created.");
-            if (!AskYesNo($"Create '{name}' again (private) and upload this project to it?", true)) return null;
+            // The address this project has been using: its repository was deleted. A freshly typed one: more likely a typo.
+            bool saved = HasRemote("origin") && SameRepository(GetRemoteUrl(), url);
+            if (saved)
+            {
+                WriteLineColor(ConsoleColor.Yellow, $"\nYour GitHub account has no repository called '{name}' any more - it was deleted on GitHub.");
+                if (!AskYesNo($"Create '{name}' again (private) and upload this project to it?", true)) return null;
+            }
+            else
+            {
+                WriteLineColor(ConsoleColor.Yellow, $"\nYour GitHub account has no repository called '{name}'. Check the address for a typo.");
+                if (!AskYesNo($"Create a new private repository called '{name}'?", false)) return null;
+            }
             var created = CreateGitHubRepository(name);
             if (created.Url == null)
             {
@@ -97,12 +107,12 @@ namespace GitSync
             }
             if (!created.AlreadyExists)
             {
-                WriteLineColor(ConsoleColor.Green, $"Created {ToWebUrl(created.Url) ?? created.Url} again - private, so only you can see it.");
-                Log($"Created the GitHub repository {MaskUrl(created.Url)} again");
+                WriteLineColor(ConsoleColor.Green, $"Created {ToWebUrl(created.Url) ?? created.Url} - private, so only you can see it.");
+                Log($"Created the GitHub repository {MaskUrl(created.Url)}" + (saved ? " again" : ""));
             }
             // What was fetched from the old repository says nothing about the new, empty one - commits only those copies hold
             // are kept on local branches first
-            if (HasRemote("origin") && SameRepository(GetRemoteUrl(), url))
+            if (saved)
             {
                 KeepCommitsOnlyInRemoteBranches();
                 ForgetRemoteBranches();

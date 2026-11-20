@@ -810,14 +810,15 @@ namespace GitSync
             // mongodb+srv://app:Hunter2@cluster0... - the password sits right in the address
             ("a database address with a password", new Regex(@"(?i)\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqps?|mssql|sqlserver)://(?<user>[^\s:/@""']*):([^\s@/""']+)@")),
             ("a hard-coded password or key", new Regex(@"(?i)\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\b[""']?\s*[:=]\s*[""']([^""'\s]{6,})[""']")),
-            // Only on a line that also names a server, database or user: "Server=db;User Id=sa;Password=...;" - so code such as
-            // "BOOL password = FALSE;" (a flag for "is this a password field") isn't one
-            ("a password in a connection string", new Regex(@"(?i)^(?=.*\b(?:server|data\s+source|host|address|addr|database|initial\s+catalog|user\s*id|uid|user|username|dsn)\s*=\s*[^\s;=]).*?\b(?:password|pwd)\s*=\s*([^;""'\s]{4,})\s*(?:;|[""']|$)")),
+            // "Server=db;User Id=sa;Password=...;" - one of the ';'-separated pairs, on a line that also names a server, database
+            // or user. Code such as "BOOL password = FALSE;" or connect(host=h, password=p) isn't a connection string.
+            ("a password in a connection string", new Regex(@"(?i)^(?=.*\b(?:server|data\s+source|host|address|addr|database|initial\s+catalog|user\s*id|uid|user|username|dsn)\s*=\s*[^\s;=]).*?(?:^|[;""'])\s*(?:password|pwd)\s*=\s*([^;""'\s]{4,})\s*(?:;|[""']|$)")),
         };
 
-        // "your_api_key_here", "${API_KEY}", "<password>", "changeme", ... are examples, not secrets
+        // "your_api_key_here", "${API_KEY}", "$password", "{pw}", "[YOUR-PASSWORD]", "<password>", "changeme", ... are
+        // examples or variables, not secrets
         private static readonly Regex PlaceholderValue = new Regex(
-            @"(?i)^(your|my|example|sample|placeholder|changeme|change_me|dummy|fake|test|xxx|\*|<|\$\{|\{\{|%|todo|none|null|password|secret|process\.env|os\.environ)",
+            @"(?i)^(your|my|example|sample|placeholder|changeme|change_me|dummy|fake|test|xxx|\*|<|\$\{|\$[a-z_(]|\{|\[|%|todo|none|null|password|secret|process\.env|os\.environ)",
             RegexOptions.Compiled);
 
         // The well-known passwords of local development databases and brokers (postgres:postgres, guest:guest, root:root)

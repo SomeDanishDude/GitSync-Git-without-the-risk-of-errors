@@ -329,7 +329,13 @@ namespace GitSync
 
             WriteLineColor(ConsoleColor.Red, "\nGit is not installed (or not on PATH), so GitSync can't do anything yet.");
             // Windows' own installer can fetch it right here, from Microsoft's package list - no download page to find
-            if (!Console.IsInputRedirected && WingetAvailable() && AskYesNo("Install Git now with Windows' own installer (winget)? It takes a minute or two", true))
+            bool install = false;
+            try
+            {
+                install = !Console.IsInputRedirected && WingetAvailable() && AskYesNo("Install Git now with Windows' own installer (winget)? It takes a minute or two", true);
+            }
+            catch (UserAbortException) { } // "cancel" here, before any mode has started, just means no
+            if (install)
             {
                 int exit = RunInstaller("winget", "install", "--id", "Git.Git", "-e", "--source", "winget");
                 GitExecutable = new Lazy<string>(FindGitOnPath); // found in its standard folder, even before this window's PATH knows it

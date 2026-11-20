@@ -935,14 +935,15 @@ namespace GitSync
         static bool IsVisualStudioUserFile(string name) =>
             Regex.IsMatch(name, @"\.(vcxproj|vcproj|csproj|vbproj|fsproj|sqlproj|wapproj|pyproj|njsproj)\.user$", RegexOptions.IgnoreCase);
 
-        // Only empty elements ("<PropertyGroup />"), as Visual Studio writes it before anything was set: nothing to lose
-        static bool HoldsNoSettings(string path)
+        // Only the empty shell ("<Project><PropertyGroup /></Project>"), as Visual Studio writes it before anything was set
+        internal static bool HoldsNoSettings(string path)
         {
             try
             {
                 if (new FileInfo(path).Length > 64 * 1024) return false;
-                string text = Regex.Replace(File.ReadAllText(path), @"<!--.*?-->", "", RegexOptions.Singleline);
-                return !Regex.IsMatch(text, @">\s*[^<\s]");
+                string text = Regex.Replace(File.ReadAllText(path), @"<!--.*?-->|<\?.*?\?>", "", RegexOptions.Singleline);
+                bool onlyShells = Regex.Matches(text, @"<([A-Za-z_][\w.:-]*)").All(m => m.Groups[1].Value is "Project" or "PropertyGroup" or "ItemGroup");
+                return onlyShells && !Regex.IsMatch(text, @">\s*[^<\s]");
             }
             catch
             {
