@@ -98,8 +98,10 @@ namespace GitSync
                 else SuggestReadme(sessionFolder!, detectedProjectTypes);
             }
 
-            // 6. Nested repositories, Large Files & Secrets (only files that will actually be committed; in a project that
-            //    is on the remote already, only what changed - commits that aren't pushed yet are checked before the push)
+            // 6. Files the project needs that the .gitignore leaves out (offered first, so the checks below cover them too), then
+            //    nested repositories, large files & secrets (only files that will actually be committed; in a project that is
+            //    on the remote already, only what changed - commits that aren't pushed yet are checked before the push)
+            IncludeIgnoredCoreFiles(sessionFolder!);
             bool published = hadCommits && HasPublishedHistory();
             CheckEmbeddedRepositories();
             CheckLargeFiles(sessionFolder!);
@@ -1809,6 +1811,7 @@ namespace GitSync
         {
             CheckGitIdentity();
             BackupIndex();
+            IncludeIgnoredCoreFiles(sessionFolder!);
             CheckEmbeddedRepositories();
             CheckLargeFiles(sessionFolder!);
             ScanSecrets(sessionFolder!, onlyChangedFiles: HasPublishedHistory());

@@ -422,6 +422,235 @@ namespace GitSync
         // Pre-commit Checks
         // =================================================================================
 
+        // =================================================================================
+        // Files the project needs that a .gitignore leaves out
+        // =================================================================================
+
+        // Project and build definitions: never build output, and a project can't be opened or built without them
+        private static readonly HashSet<string> CoreFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "CMakeLists.txt", "CMakePresets.json", "Makefile", "GNUmakefile", "meson.build", "configure.ac", "package.json",
+            "tsconfig.json", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "Cargo.toml", "go.mod",
+            "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "vcpkg.json",
+            "vcpkg-configuration.json", "conanfile.txt", "conanfile.py", "project.godot", "Gemfile", "composer.json",
+            "pubspec.yaml", "Podfile", "Package.swift", "Dockerfile", "AndroidManifest.xml", "Directory.Build.props",
+            "Directory.Build.targets", "Directory.Packages.props", "global.json",
+        };
+        private static readonly HashSet<string> CoreFileExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".sln", ".slnx", ".vcxproj", ".filters", ".csproj", ".fsproj", ".vbproj", ".vcproj", ".uproject", ".uplugin", ".pro", ".pri",
+        };
+        // Source code is written by hand: part of the project wherever it is - except in build and dependency folders
+        private static readonly HashSet<string> SourceExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ixx", ".cppm", ".cs", ".py", ".js", ".jsx",
+            ".mjs", ".ts", ".tsx", ".java", ".kt", ".go", ".rs", ".swift", ".m", ".mm", ".rb", ".php", ".lua", ".gd", ".gdshader",
+            ".shader", ".hlsl", ".glsl", ".vue", ".svelte", ".dart", ".scala", ".hs", ".fs", ".vb", ".sh", ".ps1", ".cmake",
+            ".proto", ".xaml", ".razor",
+        };
+
+        // What kind of project a folder holds - it decides which of the files its .gitignore leaves out are the project's own
+        internal sealed class ProjectShape
+        {
+            public string Root = "";
+            public bool Unity, Unreal, Godot;
+            public bool InSourceCMake;      // CMake built right in the project folder: its Makefiles sit next to the sources
+            public Dictionary<string, string?> GeneratedTrees = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        internal static ProjectShape ReadProjectShape(string root)
+        {
+            var shape = new ProjectShape { Root = root };
+            try
+            {
+                shape.Unity = Directory.Exists(Path.Combine(root, "Assets")) && Directory.Exists(Path.Combine(root, "ProjectSettings"));
+                shape.Unreal = Directory.EnumerateFiles(root, "*.uproject").Any();
+                shape.Godot = File.Exists(Path.Combine(root, "project.godot"));
+                shape.InSourceCMake = File.Exists(Path.Combine(root, "CMakeCache.txt"));
+            }
+            catch { }
+            return shape;
+        }
+
+        // A folder that a tool fills completely, recognised by the marker it leaves at its top: a CMake build folder
+        // (CMakeCache.txt), a Python virtual environment (pyvenv.cfg) or a conda environment (conda-meta) - whatever its name
+        internal static string? GeneratedTreeKind(string folder)
+        {
+            try
+            {
+                if (File.Exists(Path.Combine(folder, "CMakeCache.txt"))) return "CMake build folder";
+                if (File.Exists(Path.Combine(folder, "pyvenv.cfg"))) return "Python environment";
+                if (Directory.Exists(Path.Combine(folder, "conda-meta"))) return "conda environment";
+            }
+            catch { }
+            return null;
+        }
+
+        // What CMake writes when it builds inside the project folder itself (next to every CMakeLists.txt)
+        static bool IsCMakeOutputName(string name) =>
+            Regex.IsMatch(name, @"^(Makefile|CMakeCache\.txt|cmake_install\.cmake|CTestTestfile\.cmake|CPack(Source)?Config\.cmake|compile_commands\.json|build\.ninja|\.ninja_(deps|log))$|\.(sln|vcxproj|filters)$", RegexOptions.IgnoreCase);
+
+        // Why a file the .gitignore leaves out is part of the project itself - or null when it isn't: build output,
+        // dependencies, leftovers, and passwords and keys (those stay out on purpose). path: relative to the project's top
+        // folder, "/" separated.
+        internal static string? CoreFileReason(ProjectShape shape, string path)
+        {
+            var parts = path.Split('/');
+            string name = parts[^1];
+            string ext = Path.GetExtension(name);
+            var folders = parts.Take(parts.Length - 1).ToList();
+            if (IsSensitiveFileName(name) || IsJunkFileName(name)) return null;
+            if (folders.Count > 0 && folders[0].Equals(BackupFolderName, StringComparison.OrdinalIgnoreCase)) return null; // GitSync's own copies
+            if (folders.Any(IsAlwaysGeneratedFolder) || InGeneratedTree(shape, folders) != null) return null;
+            if (shape.InSourceCMake && IsCMakeOutputName(name)) return null;
+
+            // What a game engine's project is made of
+            string top = folders.Count > 0 ? folders[0] : "";
+            if (shape.Unity && (top.Equals("Assets", StringComparison.OrdinalIgnoreCase) || top.Equals("ProjectSettings", StringComparison.OrdinalIgnoreCase)
+                    || path.Equals("Packages/manifest.json", StringComparison.OrdinalIgnoreCase) || path.Equals("Packages/packages-lock.json", StringComparison.OrdinalIgnoreCase)))
+            {
+                // Unity's own folders: the Unity rule decides, also when it says "left out on purpose"
+                return UnityLeavesOutOnPurpose(path) ? null : "part of the Unity project";
+            }
+            if (shape.Unreal && new[] { "Source", "Content", "Config" }.Contains(top, StringComparer.OrdinalIgnoreCase)) return "part of the Unreal project";
+            if (shape.Godot && new[] { ".gd", ".tscn", ".tres", ".gdshader", ".cs", ".godot" }.Contains(ext, StringComparer.OrdinalIgnoreCase)) return "part of the Godot project";
+
+            // Anywhere but in build output: a Visual Studio or CMake build folder holds generated copies of these
+            if (folders.Any(f => IgnoredGeneratedFolders.Contains(f))) return null;
+            if (CoreFileNames.Contains(name) || CoreFileExtensions.Contains(ext))
+            {
+                if (shape.Unity && folders.Count == 0 && (ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase) || ext.Equals(".sln", StringComparison.OrdinalIgnoreCase))) return null; // Unity writes those
+                if (shape.Unreal && new[] { ".sln", ".vcxproj", ".filters" }.Contains(ext, StringComparer.OrdinalIgnoreCase)) return null;  // so does Unreal
+                return "a project or build file";
+            }
+            if (SourceExtensions.Contains(ext) && !LooksGenerated(name)) return "source code";
+            return null;
+        }
+
+        // Code that tools write: x.g.cs, x.generated.h, x.gen.cpp, x.pb.cc, moc_x.cpp, AssemblyInfo.cs...
+        static bool LooksGenerated(string name) =>
+            Regex.IsMatch(name, @"\.(g|g\.i|generated|gen|pb)\.[^.]+$|_generated\.[^.]+$|Assembly(Info|Attributes)\.cs$|^(moc|ui|qrc)_", RegexOptions.IgnoreCase);
+
+        // What Unity's standard .gitignore leaves out of Assets on purpose: debug symbols, store tools, Addressables builds
+        static bool UnityLeavesOutOnPurpose(string path) =>
+            Regex.IsMatch(path, @"(^|/)(AssetStoreTools|Plugins/Editor/JetBrains)|\.(pidb|pdb|mdb)(\.meta)?$|(^|/)(sysinfo\.txt|crashlytics-build\.properties)$|AddressableAssetsData/.*\.bin|StreamingAssets/aa(/|\.meta$)", RegexOptions.IgnoreCase);
+
+        // Inside a folder a tool fills completely (see GeneratedTreeKind): "build/ (CMake build folder)", or null
+        internal static string? InGeneratedTree(ProjectShape shape, List<string> folders)
+        {
+            for (int i = 1; i <= folders.Count; i++)
+            {
+                string dir = string.Join("/", folders.Take(i));
+                if (!shape.GeneratedTrees.TryGetValue(dir, out string? kind))
+                {
+                    shape.GeneratedTrees[dir] = kind = GeneratedTreeKind(Path.Combine(shape.Root, dir.Replace('/', Path.DirectorySeparatorChar)));
+                }
+                if (kind != null) return $"{dir}/ ({kind})";
+            }
+            return null;
+        }
+
+        // Which ignore rule leaves each file out (where it is written, its line, the pattern). where: how git finds the project
+        // (-C <folder>, or --git-dir/--work-tree for a plain folder)
+        internal static Dictionary<string, (string Source, string Line, string Pattern)> IgnoreRules(IEnumerable<string> paths, params string[] where)
+        {
+            var args = where.Concat(new[] { "check-ignore", "-v", "--no-index", "-z", "--stdin" }).ToArray();
+            var result = ExecuteGit(args, silent: true, live: false, input: string.Concat(paths.Select(p => p + "\0")));
+            var fields = result.Output.Split('\0');
+            var rules = new Dictionary<string, (string Source, string Line, string Pattern)>();
+            // "<source>\0<line>\0<pattern>\0<path>\0" for every path a rule matches
+            for (int i = 0; i + 3 < fields.Length; i += 4)
+            {
+                if (fields[i + 3] != "") rules[fields[i + 3]] = (fields[i], fields[i + 1], fields[i + 2]);
+            }
+            return rules;
+        }
+
+        internal static string DescribeRule((string Source, string Line, string Pattern) rule) => $"\"{rule.Pattern}\" ({rule.Source}, line {rule.Line})";
+
+        // A rule that names exactly this one file ("local_settings.py", "/src/config_local.h") was written for it on purpose -
+        // unlike "*.txt" or "src/", which take along files nobody meant
+        internal static bool IsRuleForThisFileOnly(string pattern, string path)
+        {
+            string p = pattern.Trim();
+            if (p.Length == 0 || p.StartsWith("!") || p.EndsWith("/") || p.IndexOfAny(new[] { '*', '?', '[' }) >= 0) return false;
+            p = p.TrimStart('/');
+            string name = path.Substring(path.LastIndexOf('/') + 1);
+            return p.Equals(name, StringComparison.OrdinalIgnoreCase) || p.Equals(path, StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith("/" + p, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Files the user chose to keep out although they look like part of the project - not asked about again. Kept in the
+        // repository's own .git folder, so it never leaves this computer.
+        static string KeepOutListPath(string root) => GitPathOf(root, "--git-path", "gitsync-keep-out.txt");
+
+        internal static HashSet<string> ReadKeepOutList(string root)
+        {
+            try
+            {
+                string file = KeepOutListPath(root);
+                return file != "" && File.Exists(file)
+                    ? new HashSet<string>(File.ReadAllLines(file).Where(l => l.Length > 0), StringComparer.Ordinal)
+                    : new HashSet<string>(StringComparer.Ordinal);
+            }
+            catch
+            {
+                return new HashSet<string>(StringComparer.Ordinal);
+            }
+        }
+
+        // The project's own files that its .gitignore leaves out by mistake (root: the repository's top folder) - not the ones
+        // a rule names on purpose, nor ones the user already chose to keep out
+        internal static List<(string Path, string Why, string Rule)> FindIgnoredCoreFiles(string root)
+        {
+            var found = new List<(string Path, string Why, string Rule)>();
+            var ignored = SplitNul(RunGit(true, "-C", root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard").Output);
+            if (ignored.Count == 0) return found;
+            var shape = ReadProjectShape(root);
+            var keepOut = ReadKeepOutList(root);
+            var candidates = ignored.Where(p => !keepOut.Contains(p)).Select(p => (Path: p, Why: CoreFileReason(shape, p))).Where(c => c.Why != null).ToList();
+            if (candidates.Count == 0) return found;
+            var rules = IgnoreRules(candidates.Select(c => c.Path), "-C", root);
+            foreach (var (path, why) in candidates)
+            {
+                bool hasRule = rules.TryGetValue(path, out var rule);
+                if (hasRule && IsRuleForThisFileOnly(rule.Pattern, path)) continue;
+                found.Add((path, why!, hasRule ? DescribeRule(rule) : ""));
+            }
+            return found;
+        }
+
+        // Files the project needs that its .gitignore leaves out would never be uploaded - usually a rule that is too broad
+        // ("*.txt" takes CMakeLists.txt along, "bin/" a plugin's DLLs). Names the rule, and offers to upload them anyway: once
+        // they're in Git, the rule no longer applies to them. A "no" is remembered.
+        internal static void IncludeIgnoredCoreFiles(string root)
+        {
+            var core = FindIgnoredCoreFiles(root);
+            if (core.Count == 0) return;
+            WriteLineColor(ConsoleColor.Yellow, $"\n[WARNING] Your .gitignore leaves out {core.Count} file(s) the project needs - they'd never be uploaded:");
+            foreach (var (path, why, rule) in core.Take(10))
+            {
+                Console.WriteLine($"    {path}  ({why}" + (rule != "" ? $" - left out by {rule})" : ")"));
+            }
+            if (core.Count > 10) Console.WriteLine($"    ... and {core.Count - 10} more");
+            if (!AskYesNo("Upload them anyway?", true))
+            {
+                try
+                {
+                    string list = KeepOutListPath(root);
+                    if (list != "") File.AppendAllLines(list, core.Select(c => c.Path));
+                }
+                catch { }
+                Console.WriteLine("OK - they stay out, and GitSync won't ask about them again.");
+                return;
+            }
+
+            var add = ExecuteGit(new[] { "-C", root, "--literal-pathspecs", "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul" },
+                silent: true, live: false, input: string.Concat(core.Select(c => c.Path + "\0")));
+            if (add.Success) LogVerbose($"Added {core.Count} file(s) the .gitignore left out - from now on they're uploaded like the rest.");
+            else ExplainGitFailure(add, "Adding the files");
+        }
+
         // A folder with its own .git would be uploaded as an empty "link" instead of its files
         static void CheckEmbeddedRepositories()
         {

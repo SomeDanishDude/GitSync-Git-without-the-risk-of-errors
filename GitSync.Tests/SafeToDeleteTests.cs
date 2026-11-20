@@ -152,6 +152,41 @@ namespace GitSync.Tests
         }
 
         [Fact]
+        public void VcpkgAndCMakeWorkingFoldersCountAsRecreatable()
+        {
+            // A real C++ project came out NOT SAFE over 7374 files in vcpkg_installed - which "vcpkg install" brings back
+            string clone = Clone();
+            Write(clone, "AntColony/vcpkg_installed/vcpkg/blds/brotli/config-x64-windows-dbg-out.log", "build log\n");
+            Write(clone, "AntColony/vcpkg_installed/x64-windows/include/brotli/decode.h", "#pragma once\n");
+            Write(clone, "AntColony/cmake-build-debug/main.obj", "\0obj");
+            Write(clone, "AntColony/build/CMakeFiles/CMakeOutput.log", "cmake\n");
+            Write(clone, "AntColony/ipch/AntColony.ipch", "\0pch");
+
+            var check = CheckClone(clone);
+
+            Assert.True(check.Safe, string.Join(", ", check.Files.Where(f => f.Blocks).Select(f => f.Path)));
+            Assert.All(check.Files.Where(f => f.Path.StartsWith("AntColony/")), f => Assert.Equal(FileKind.Generated, f.Kind));
+        }
+
+        [Fact]
+        public void ALongListIsShownByFolderButSecretsKeepTheirOwnLine()
+        {
+            var files = Enumerable.Range(0, 100).Select(i => new CheckedFile { Path = $"data/raw/file{i}.csv", Kind = FileKind.OnlyHere, Ignored = true })
+                .Append(new CheckedFile { Path = ".env", Kind = FileKind.OnlyHere, Ignored = true, Detail = "holds passwords or keys" })
+                .Append(new CheckedFile { Path = "notes.txt", Kind = FileKind.OnlyHere })
+                .ToList();
+
+            var lines = Program.DescribeFiles(files, 15);
+
+            Assert.Contains("    data/raw/  (100 files, left out by .gitignore)", lines);
+            Assert.Contains(lines, l => l.StartsWith("    .env"));
+            Assert.Contains("    notes.txt", lines);
+            Assert.True(lines.Count <= 5, string.Join("\n", lines));
+            // A short list still names every file
+            Assert.Equal(2, Program.DescribeFiles(files.Skip(100).ToList(), 15).Count);
+        }
+
+        [Fact]
         public void AnUnpushedCommitOnAnotherBranchMakesItNotSafe()
         {
             string clone = Clone();
@@ -452,6 +487,137 @@ namespace GitSync.Tests
             Write(copy, "README.md", "# Project\n");
 
             Assert.False(Program.CheckFolder(copy, "", null, "").Safe);
+        }
+
+        // ---- A .gitignore that leaves out files the project needs ----
+
+        [Fact]
+        public void ATooBroadIgnoreRuleIsCaughtButBuildFoldersAreNot()
+        {
+            string repo = NewPlainRepo("broad-rules", "*.txt\nsrc/\nmybuild/\n");
+            Write(repo, "CMakeLists.txt", "project(Ants)\n");      // "*.txt" takes it along
+            Write(repo, "notes.txt", "my notes\n");                // a text file - not something the project needs
+            Write(repo, "src/main.cpp", "int main() {}\n");        // "src/" hides the code
+            Write(repo, "mybuild/CMakeCache.txt", "# cache\n");    // a CMake build folder: generated copies only
+            Write(repo, "mybuild/Makefile", "all:\n");
+            Write(repo, "mybuild/generated/version.cpp", "int v;\n");
+
+            var core = Program.FindIgnoredCoreFiles(repo);
+
+            Assert.Equal(new[] { "CMakeLists.txt", "src/main.cpp" }, core.Select(c => c.Path).OrderBy(p => p, StringComparer.Ordinal));
+        }
+
+        [Fact]
+        public void AUnityProjectsAssetsAreCaughtButWhatUnityRecreatesIsNot()
+        {
+            string repo = NewPlainRepo("unity", "x64/\n*.csproj\n*.sln\nAssets/AssetStoreTools*\n");
+            Write(repo, "ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.0.1f1\n");
+            Write(repo, "Assets/Plugins/x64/native.dll", "\0dll");          // a plugin a stray "x64/" rule hides
+            Write(repo, "Assets/AssetStoreTools/tool.cs", "class T {}\n");    // left out on purpose by Unity's template
+            Write(repo, "Game.csproj", "<Project />\n");                       // Unity writes these itself
+            Write(repo, "Game.sln", "\n");
+
+            var core = Program.FindIgnoredCoreFiles(repo);
+
+            Assert.Equal("Assets/Plugins/x64/native.dll", Assert.Single(core).Path);
+        }
+
+        [Theory]
+        [InlineData("y", true)]
+        [InlineData("n", false)]
+        public void SyncUploadsThemWhenTheUserSaysSo(string answer, bool added)
+        {
+            string repo = NewPlainRepo("sync-core", "*.txt\n");
+            Write(repo, "CMakeLists.txt", "project(Ants)\n");
+            Console.SetIn(new StringReader(answer + "\n"));
+
+            Program.IncludeIgnoredCoreFiles(repo);
+
+            Assert.Equal(added, RunGit(repo, "ls-files", "--cached").Contains("CMakeLists.txt"));
+        }
+
+        [Fact]
+        public void TheCheckNamesTheRuleThatLeavesOutAProjectFile()
+        {
+            string clone = Clone();
+            File.AppendAllText(Path.Combine(clone, ".gitignore"), "*.txt\n");
+            Write(clone, "CMakeLists.txt", "project(Ants)\n");
+
+            var check = CheckClone(clone);
+
+            var file = check.Files.Single(f => f.Path == "CMakeLists.txt");
+            Assert.False(check.Safe);
+            Assert.True(file.Core);
+            Assert.Contains("\"*.txt\"", file.Detail);
+        }
+
+        [Fact]
+        public void APythonEnvironmentIsNeverMistakenForTheProjectsCode()
+        {
+            // Named "env", which no folder list knows - its pyvenv.cfg gives it away
+            string repo = NewPlainRepo("venv", "env/\n");
+            Write(repo, "env/pyvenv.cfg", "home = C:\\Python312\n");
+            Write(repo, "env/Lib/site-packages/pip/__init__.py", "__version__ = '24.0'\n");
+            Assert.Empty(Program.FindIgnoredCoreFiles(repo));
+
+            string clone = Clone();
+            Write(clone, "env/pyvenv.cfg", "home = C:\\Python312\n");
+            Write(clone, "env/Lib/site-packages/pip/__init__.py", "__version__ = '24.0'\n");
+            var check = CheckClone(clone);
+            Assert.True(check.Safe);
+            Assert.All(check.Files.Where(f => f.Path.StartsWith("env/")), f => Assert.Equal(FileKind.Generated, f.Kind));
+        }
+
+        [Fact]
+        public void AnInSourceCMakeBuildsOutputIsNotFlaggedButAHandWrittenModuleIs()
+        {
+            string repo = NewPlainRepo("in-source", "*.cmake\nMake*\nCMakeCache.txt\n");
+            Write(repo, "CMakeLists.txt", "project(Ants)\n");
+            Write(repo, "CMakeCache.txt", "# cache\n");              // CMake built right here
+            Write(repo, "Makefile", "all:\n");
+            Write(repo, "cmake_install.cmake", "# install\n");
+            Write(repo, "src/Makefile", "all:\n");
+            Write(repo, "cmake/FindFoo.cmake", "# written by hand\n"); // "*.cmake" takes this one along by mistake
+
+            var core = Program.FindIgnoredCoreFiles(repo);
+
+            Assert.Equal("cmake/FindFoo.cmake", Assert.Single(core).Path);
+        }
+
+        [Fact]
+        public void ARuleForOneExactFileIsRespected()
+        {
+            string repo = NewPlainRepo("exact-rule", "config_local.h\n*.txt\n");
+            Write(repo, "config_local.h", "#define DEBUG 1\n");       // named on purpose
+            Write(repo, "src/config_local.h", "#define DEBUG 1\n");
+            Write(repo, "CMakeLists.txt", "project(Ants)\n");          // taken along by "*.txt"
+
+            var core = Program.FindIgnoredCoreFiles(repo);
+
+            Assert.Equal("CMakeLists.txt", Assert.Single(core).Path);
+        }
+
+        [Fact]
+        public void ANoIsRememberedAndOnlyNewFilesAreAskedAbout()
+        {
+            string repo = NewPlainRepo("keep-out", "*.txt\n");
+            Write(repo, "CMakeLists.txt", "project(Ants)\n");
+            Console.SetIn(new StringReader("n\n"));
+            Program.IncludeIgnoredCoreFiles(repo);
+            Assert.Empty(Program.FindIgnoredCoreFiles(repo));
+
+            Write(repo, "tools/CMakeLists.txt", "add_executable(tool)\n");
+
+            Assert.Equal("tools/CMakeLists.txt", Assert.Single(Program.FindIgnoredCoreFiles(repo)).Path);
+        }
+
+        private string NewPlainRepo(string name, string gitignore)
+        {
+            string repo = Path.Combine(root, name);
+            Directory.CreateDirectory(repo);
+            Git(repo, "init", "-q");
+            Write(repo, ".gitignore", gitignore);
+            return repo;
         }
 
         // ---- The check only reads ----
