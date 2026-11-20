@@ -217,7 +217,8 @@ namespace GitSync
         {
             while (true)
             {
-                string answer = GetUserInput("\nPaste the GitHub address of this project (Enter = it isn't on GitHub): ").Trim('"');
+                string answer = UsualAnswer("GitHub address of this folder itself:", "none") ? ""
+                    : GetUserInput("\nPaste the GitHub address of this project (Enter = it isn't on GitHub): ").Trim('"');
                 if (answer == "") return "";
                 string? url = NormalizeRemoteUrl(answer);
                 if (url == null)

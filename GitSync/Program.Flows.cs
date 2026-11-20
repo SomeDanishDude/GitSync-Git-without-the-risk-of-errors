@@ -27,6 +27,8 @@ namespace GitSync
             WriteLineColor(ConsoleColor.Cyan, $"\nSelected Folder: {selectedFolder}");
             if (!ConfirmBroadFolder(selectedFolder)) return;
             if (!EnsureFolderTrusted(selectedFolder)) return;
+            // A folder that holds several projects (and isn't one itself): each can go to GitHub as a repository of its own
+            if (OfferToSyncEachProject(selectedFolder)) return;
             if (RunGit(true, "rev-parse", "--is-bare-repository").Output.Trim() == "true")
             {
                 WriteLineColor(ConsoleColor.Red, "\nThat is a bare repository (the storage folder of a remote), not a project folder. Pick the folder with your files instead.");
@@ -69,7 +71,8 @@ namespace GitSync
             string branchName;
             if (isNewRepo)
             {
-                branchName = AskBranchName("\nBranch name for the new repository (Enter = main): ", "main");
+                branchName = UsualAnswer("\nBranch name for the new repository:", "main") ? "main"
+                    : AskBranchName("\nBranch name for the new repository (Enter = main): ", "main");
                 if (!InitRepository(branchName)) return;
             }
             else
@@ -107,8 +110,8 @@ namespace GitSync
             CheckLargeFiles(sessionFolder!);
             ScanSecrets(sessionFolder!, onlyChangedFiles: published);
 
-            // 7. Quality Gate
-            if (!CheckQualityGates(sessionFolder!, onlyChangedFiles: published)) return;
+            // 7. TODO/FIXME comments: a note, not a question
+            NoteTodoComments(sessionFolder!, onlyChangedFiles: published);
 
             // 8. Stage everything
             if (!StageAll()) return;
@@ -126,12 +129,13 @@ namespace GitSync
 
             // 9. Commit Message
             string suggested = hadCommits ? SuggestCommitMessage(changes) : "Initial commit";
-            string commitMsg = GetUserInput($"\nEnter Commit Message (Enter = \"{suggested}\"): ", freeText: true);
+            string commitMsg = UsualAnswer("\nCommit message:", $"\"{suggested}\"") ? ""
+                : GetUserInput($"\nEnter Commit Message (Enter = \"{suggested}\"): ", freeText: true);
             if (string.IsNullOrEmpty(commitMsg)) commitMsg = suggested;
 
             // 10. Summary
             PrintSummary(remoteUrl, remoteBranch, commitMsg, changes);
-            if (!AskYesNo("Ready to Push?"))
+            if (!(UsualAnswer("Ready to Push?", "yes") || AskYesNo("Ready to Push?")))
             {
                 Log("Aborted", remoteUrl, remoteBranch);
                 WriteLineColor(ConsoleColor.Yellow, "Cancelled - nothing was committed or uploaded.");
@@ -153,6 +157,92 @@ namespace GitSync
             PerformPush(remoteBranch);
         }
 
+        // Folders that are parts of one project, not projects of their own
+        private static readonly HashSet<string> ProjectPartNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "src", "source", "sources", "test", "tests", "doc", "docs", "lib", "libs", "include", "assets", "scripts", "tools",
+            "examples", "samples", "data", "resources", "res", "config", "public", "static", "third_party", "external",
+        };
+
+        // A project shows itself at its top: Git, a project or build file, or code of its own
+        internal static bool LooksLikeProject(string folder)
+        {
+            try
+            {
+                if (Directory.Exists(Path.Combine(folder, ".git")) || File.Exists(Path.Combine(folder, ".git"))) return true;
+                return Directory.EnumerateFiles(folder).Select(Path.GetFileName).Any(name =>
+                {
+                    string ext = Path.GetExtension(name!);
+                    return CoreFileNames.Contains(name!) || CoreFileExtensions.Contains(ext) || SourceExtensions.Contains(ext)
+                        || ext.Equals(".bat", StringComparison.OrdinalIgnoreCase) || ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase);
+                });
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // The projects in a folder that holds several (like "VS Projects"), or none when the folder is a project itself.
+        // A project made of parts (frontend/ and backend/ next to a README) mustn't be split into repositories: so the folder
+        // has to have no files of its own, or hold at least one project that is a Git repository already.
+        internal static List<string> FindProjectsInFolder(string folder)
+        {
+            if (LooksLikeProject(folder)) return new List<string>();
+            try
+            {
+                var projects = Directory.EnumerateDirectories(folder)
+                    .Where(d =>
+                    {
+                        string name = Path.GetFileName(d);
+                        return !name.StartsWith(".") && !IsAlwaysGeneratedFolder(name) && !IgnoredGeneratedFolders.Contains(name) && !ProjectPartNames.Contains(name);
+                    })
+                    .Where(LooksLikeProject)
+                    .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                bool hasOwnFiles = Directory.EnumerateFiles(folder).Any(f => !IsJunkFileName(Path.GetFileName(f)));
+                bool holdsRepository = projects.Any(p => Directory.Exists(Path.Combine(p, ".git")) || File.Exists(Path.Combine(p, ".git")));
+                return projects.Count >= 2 && (!hasOwnFiles || holdsRepository) ? projects : new List<string>();
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
+        static string DescribeProjectState(string project)
+        {
+            if (!Directory.Exists(Path.Combine(project, ".git")) && !File.Exists(Path.Combine(project, ".git"))) return "not a Git repository yet - becomes one, with a GitHub repository";
+            string origin = GetOriginOf(project);
+            return origin == "" ? "no GitHub repository yet - one is created for it" : $"on {ToWebUrl(origin) ?? MaskUrl(origin)}";
+        }
+
+        // One question for a whole folder of projects: upload each to its own GitHub repository (questions with a usual answer
+        // are answered along the way), then check all of them at once. True when that is what happens next.
+        static bool OfferToSyncEachProject(string folder)
+        {
+            if (Directory.Exists(".git") || File.Exists(".git") || IsInsideRepository()) return false;
+            var projects = FindProjectsInFolder(folder);
+            if (projects.Count == 0) return false;
+
+            WriteLineColor(ConsoleColor.Cyan, $"\nThis folder holds {projects.Count} projects - each can go to GitHub as a repository of its own:");
+            foreach (var project in projects) Console.WriteLine($"    {Path.GetFileName(project),-45} {DescribeProjectState(project)}");
+            Console.WriteLine("Questions that have a usual answer are answered for you. Anything that needs your judgment (passwords, big files,");
+            Console.WriteLine("files changed on both sides) is still asked. Afterwards GitSync checks all of them.");
+            string choice = AskChoice("Enter = upload them one after the other (recommended), w = upload the whole folder as one project, c = cancel: ", "", "w", "c");
+            if (choice == "w") return false;
+            if (choice == "c")
+            {
+                Console.WriteLine("Nothing was uploaded.");
+                return true;
+            }
+
+            foreach (var project in projects) QueueMode("Sync", WithUsualAnswers(HandleLocalSync), project, onlyIf: null);
+            QueueMode("Check", WithUsualAnswers(HandleSafeToDelete), folder, onlyIf: null);
+            WriteLineColor(ConsoleColor.Cyan, $"Starting with {Path.GetFileName(projects[0])}...");
+            return true;
+        }
+
         // Nothing new to commit: bring in what's new on the remote, then upload whatever is still waiting
         static void SyncWithoutNewChanges(string branch)
         {
@@ -165,7 +255,7 @@ namespace GitSync
             {
                 // A new branch, or a remote that was emptied/recreated: pushing (re)creates it there
                 WriteLineColor(ConsoleColor.Yellow, $"The branch '{branch}' isn't on the remote yet.");
-                if (AskYesNo("Publish it now?", true)) PerformPush(branch);
+                if (UsualAnswer("Publish it now?", "yes") || AskYesNo("Publish it now?", true)) PerformPush(branch);
                 return;
             }
 
@@ -179,7 +269,7 @@ namespace GitSync
             }
 
             WriteLineColor(ConsoleColor.Yellow, $"{waiting} commit(s) are waiting to be uploaded.");
-            if (AskYesNo("Push them now?", true)) PerformPush(branch);
+            if (UsualAnswer("Push them now?", "yes") || AskYesNo("Push them now?", true)) PerformPush(branch);
         }
 
         static bool InitRepository(string branchName)
@@ -383,7 +473,8 @@ namespace GitSync
             // Daily use: a branch that already has its place on the remote isn't asked about again
             if (!allowBranchChange || upstream != "") return true;
 
-            string other = MatchExistingBranchSpelling(AskBranchName("Press Enter to use it, or type another branch name: ", branch));
+            string other = UsualAnswer("Branch to upload:", $"'{branch}'") ? branch
+                : MatchExistingBranchSpelling(AskBranchName("Press Enter to use it, or type another branch name: ", branch));
             return other == branch || SwitchBranch(other, ref branch);
         }
 
@@ -513,7 +604,7 @@ namespace GitSync
         // =================================================================================
 
         // askForNewUrl: the user asked to change the URL (e.g. "Use a different remote URL"), so the current one isn't offered
-        static string SetupRemote(bool askForNewUrl = false)
+        internal static string SetupRemote(bool askForNewUrl = false)
         {
             if (HasRemote("origin"))
             {
@@ -534,7 +625,8 @@ namespace GitSync
                 {
                     while (true)
                     {
-                        string answer = GetUserInput("Press Enter to keep it, or paste a new URL to replace it: ").Trim('"');
+                        string answer = UsualAnswer("Keep this remote?", "yes") ? ""
+                            : GetUserInput("Press Enter to keep it, or paste a new URL to replace it: ").Trim('"');
                         if (answer == "" || IsYesWord(answer))
                         {
                             string? working = VerifyRemoteAccess(existing);
@@ -562,6 +654,14 @@ namespace GitSync
                 suggestedRemoteUrl = null;
                 WriteLineColor(ConsoleColor.Cyan, $"\nGitHub address: {MaskUrl(suggested)}");
                 string? working = VerifyRemoteAccess(suggested, quiet: true);
+                if (working != null) return SaveRemote(working);
+            }
+
+            // Not on GitHub at all yet: GitSync creates the repository right here, instead of a trip to github.com
+            if (!askForNewUrl && !HasRemote("origin"))
+            {
+                string? created = OfferToCreateGitHubRepository();
+                string? working = created == null ? null : VerifyRemoteAccess(created, quiet: true);
                 if (working != null) return SaveRemote(working);
             }
 
@@ -747,7 +847,7 @@ namespace GitSync
                 : $"\nYour branch '{local}' syncs with '{branch}', which the remote doesn't have - its main branch is '{remoteDefault}'.");
             Console.WriteLine($"[1] Put my work on '{remoteDefault}' (recommended - that's the branch GitHub shows)");
             Console.WriteLine($"[2] Create a separate '{branch}' branch on the remote");
-            if (AskChoice("Choice: ", "1", "2") == "2") return branch;
+            if (!UsualAnswer("Choice:", "1") && AskChoice("Choice: ", "1", "2") == "2") return branch;
 
             // '{branch}' isn't on the remote (any more): a tracking ref left from before would keep Pull and Status on it
             RunGit(true, "update-ref", "-d", $"refs/remotes/origin/{branch}");
@@ -793,7 +893,7 @@ namespace GitSync
             WriteLineColor(ConsoleColor.Yellow, $"\nYour branch '{localBranch}' is linked to '{upstream}' on the remote.");
             Console.WriteLine($"[1] Sync it as its own branch '{localBranch}' on the remote (recommended for work in progress)");
             Console.WriteLine($"[2] Sync it with '{upstream}' itself (your commits go straight into '{upstream}')");
-            string target = AskChoice("Choice: ", "1", "2") == "2" ? upstream : localBranch;
+            string target = !UsualAnswer("Choice:", "1") && AskChoice("Choice: ", "1", "2") == "2" ? upstream : localBranch;
             RunGit(true, "config", $"branch.{localBranch}.gitsynctarget", target);
             return target;
         }
@@ -1501,26 +1601,25 @@ namespace GitSync
             }
         }
 
-        // Returns false if the push should not go ahead
+        // Files over GitHub's 100 MB limit inside commits that aren't pushed yet - one question, the fitting answer as the
+        // default. Returns false if the push should not go ahead.
         static bool HandleLargeBlobsBeforePush()
         {
+            if (!RemoteIsGitHub()) return true; // a folder remote (NAS, USB drive) takes files of any size
             var large = FindLargeBlobsToPush();
             if (large.Count == 0) return true;
 
             WriteLineColor(ConsoleColor.Red, "\nThese files are over GitHub's 100 MB limit and are inside commits that haven't been pushed yet:");
             foreach (var (path, size) in large) Console.WriteLine($"    {path} ({Math.Round(size / 1024.0 / 1024.0, 1)} MB)");
-            Console.WriteLine("GitHub would reject the whole push - and deleting the files now wouldn't help, because the earlier commits still contain them.");
+            Console.WriteLine("GitHub would refuse the whole push - and deleting the files now wouldn't help, because the earlier commits still contain them.");
 
             bool lfsAvailable = RunGit(true, "lfs", "version").Output.Contains("git-lfs");
-            if (lfsAvailable) Console.WriteLine("[1] Move them into Git LFS (rewrites only the commits that aren't on the remote yet) - recommended");
-            Console.WriteLine("[2] Leave them out (they stay on your disk) and rebuild the commits that aren't pushed yet");
-            Console.WriteLine("[3] Push anyway");
-            Console.WriteLine("[4] Cancel");
-            string choice = lfsAvailable ? AskChoice("Choice: ", "1", "2", "3", "4") : AskChoice("Choice: ", "2", "3", "4");
-            if (choice == "4") return false;
-            if (choice == "3") return true;
+            string choice = lfsAvailable
+                ? AskChoice("Enter = move them into Git LFS (recommended - only commits that aren't on GitHub yet change), s = leave them out, c = cancel: ", "", "s", "c")
+                : AskChoice("Enter = leave them out (they stay on your disk; the unpushed commits are rebuilt without them), c = cancel: ", "", "c");
+            if (choice == "c") return false;
 
-            if (choice == "2")
+            if (choice == "s" || !lfsAvailable)
             {
                 if (!CanRebuildUnpushedCommits()) return false; // before anything is touched
                 var tracked = GetTrackedFiles();

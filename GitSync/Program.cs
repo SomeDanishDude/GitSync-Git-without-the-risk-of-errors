@@ -27,7 +27,6 @@ namespace GitSync
     {
         private static readonly object ConsoleLock = new object();
         private static readonly object CleanupLock = new object();
-        private static HashSet<string> autoIgnoreExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Track session state for cleanup
         private static string? sessionFolder = null;
@@ -63,6 +62,10 @@ namespace GitSync
         private static string? preselectedFolder = null;
         private static string? suggestedRemoteUrl = null; // an address the user already gave, so Sync doesn't ask for it again
         private static int successfulPushes = 0;          // counts up with every push that uploaded something
+
+        // Set while GitSync uploads a whole folder of projects: a question with a usual answer gets it without asking (and
+        // says so). Anything that needs the user's judgment - passwords, big files, conflicts, errors - is still asked.
+        private static bool answerUsualQuestions = false;
 
         // Log and recent-folder list live in %LOCALAPPDATA%\GitSync (GITSYNC_DATA_DIR overrides it)
         private static string DataDir
@@ -110,6 +113,7 @@ namespace GitSync
                 PressAnyKey("Press any key to exit...");
                 return;
             }
+            CheckForNewerVersion();
 
             while (true)
             {
@@ -148,6 +152,21 @@ namespace GitSync
         {
             queuedModes.Enqueue((name, mode, folder, onlyIf));
         }
+
+        // While a whole folder of projects is uploaded: true = the question was answered with its usual answer (shown, not asked)
+        internal static bool UsualAnswer(string question, string answer)
+        {
+            if (!answerUsualQuestions) return false;
+            WriteLineColor(ConsoleColor.DarkGray, $"{question.Trim()} {answer}  (the usual answer)");
+            return true;
+        }
+
+        static Action WithUsualAnswers(Action mode) => () =>
+        {
+            answerUsualQuestions = true;
+            try { mode(); }
+            finally { answerUsualQuestions = false; }
+        };
 
         static void RunQueuedModes()
         {
@@ -216,7 +235,6 @@ namespace GitSync
                 secretBlobsAccepted.Clear();
                 setAsideFiles.Clear();
                 setAsideFolder = null;
-                autoIgnoreExtensions.Clear();
                 filesIgnoredCount = 0;
                 lfsTrackedCount = 0;
                 detectedProjectTypes = new List<string>();

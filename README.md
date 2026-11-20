@@ -7,7 +7,7 @@ project — with safety checks first, and plain-language explanations when somet
 
 | Mode | What happens |
 | --- | --- |
-| **[1] Sync Local Folder** | Turns any folder into a Git repository (or uses the one that is there), suggests a `.gitignore`, LICENSE and README, checks for files over GitHub's 100 MB limit, secrets (`.env` files, API keys, private keys) and TODOs, then commits, merges anything new from the remote and pushes. Before pushing, it also checks the commits that haven't been pushed yet - including ones made in VS Code or plain git - for large files and secrets. |
+| **[1] Sync Local Folder** | Turns any folder into a Git repository (or uses the one that is there), creates its GitHub repository if it has none yet, suggests a `.gitignore`, LICENSE and README, checks for files over GitHub's 100 MB limit and secrets (`.env` files, API keys, private keys), then commits, merges anything new from the remote and pushes. Before pushing, it also checks the commits that haven't been pushed yet - including ones made in VS Code or plain git - for large files and secrets. Pick a folder that holds several projects, and it uploads each to its own repository. |
 | **[2] Pull Latest Changes** | Brings a repository up to date. Uncommitted work is committed first, so nothing gets overwritten; local commits can be pushed right after. |
 | **[3] Clone & Setup** | Clones a repository into a folder you choose and offers the matching setup command (`npm install`, `pip install -r requirements.txt`, `dotnet restore`, `cargo build`, ...). |
 | **[4] Status** | "Am I up to date?" — branch, last commit, commits waiting on the remote or not pushed yet, and uncommitted files. |
@@ -16,6 +16,14 @@ project — with safety checks first, and plain-language explanations when somet
 
 - A daily Sync of a project that is already on GitHub asks almost nothing: pick the folder, type what you changed,
   confirm. The branch and remote questions only come up the first time.
+- A project that isn't on GitHub yet doesn't need a trip to github.com: GitSync asks once, then creates a private
+  repository named after the folder on your account (with the sign-in Git already uses) and uploads to it.
+- Pick a folder that holds several projects (like `VS Projects`), and GitSync lists them, asks once, and uploads each
+  to its own repository - questions that have a usual answer are answered for you along the way, anything that needs
+  your judgment (passwords, big files, conflicts) is still asked. Then it checks all of them with [5].
+- Files over GitHub's 100 MB limit are one question for all of them: store them with Git LFS (the default) or leave
+  them out. A folder used as the remote (a NAS or USB drive) has no limit, so nothing is asked there.
+- TODO/FIXME comments are mentioned in one line - they never stop an upload.
 - When the same file was changed on your computer *and* on the remote, GitSync asks which version to keep
   (yours, the remote's, file by file, or edit them yourself) instead of failing.
 - If your folder is on `master` but the GitHub repository uses `main`, GitSync puts your work on `main` instead of
@@ -73,7 +81,15 @@ dotnet test
 ```
 
 Every build also publishes a self-contained single-file `GitSync/bin/SingleFile/GitSync.exe` that runs without .NET
-installed. The integration tests run real git against temporary repositories, so git must be on `PATH`.
+installed. The integration tests run real git against temporary repositories, so git must be on `PATH`. GitHub runs
+them too, on every pull request and every change to `master` (`.github/workflows/tests.yml`).
+
+## Publishing a new version
+
+On GitHub: **Releases > Draft a new release**, create a tag like `v1.1.0`, and **Publish release**. GitHub then builds
+`GitSync.exe` for that version and attaches it to the release (`.github/workflows/release.yml`). Everyone who runs
+GitSync sees one line when it starts: a newer version is available, with the link to download it. Also set
+`<Version>` in `GitSync/GitSync.csproj` to the same number, so your own builds don't call themselves out of date.
 
 ## Where GitSync keeps its files
 
@@ -87,7 +103,8 @@ GitSync shows git's own message plus what it means. The most common ones:
 | Git says | What to do |
 | --- | --- |
 | `Authentication failed` / `Invalid username or password` | GitHub no longer accepts your account password for Git. Sign in through the browser window, or use a personal access token. GitSync can forget a wrong saved login for you. |
-| `Repository not found` | Create the repository on GitHub first, check the URL, and make sure you're signed in with an account that can see it. |
+| `Repository not found` | Check the URL for typos, and make sure you're signed in with an account that can see it (private repositories look "not found" to other accounts). A project that has no GitHub address at all gets its repository created by Sync. |
+| `pack exceeds maximum allowed size` | One push is over GitHub's 2 GB limit. Keep build output and downloaded packages out with `.gitignore`, or store big assets with Git LFS, then Sync again. |
 | `[rejected] ... (fetch first)` | Someone pushed in the meantime. GitSync offers to merge their commits and try again. |
 | `Permission denied (publickey)` / `Host key verification failed` | The SSH address needs an SSH key set up with GitHub. GitSync offers to switch to the HTTPS address, which signs in through the browser instead. |
 | `detected dubious ownership` | The folder belongs to another Windows user (common on USB drives). GitSync offers to mark it as safe. |

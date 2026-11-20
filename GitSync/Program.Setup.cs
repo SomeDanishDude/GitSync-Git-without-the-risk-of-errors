@@ -162,6 +162,7 @@ namespace GitSync
             string question = File.Exists(ignorePath)
                 ? $"Add the standard {string.Join(", ", offered)} entries to .gitignore?"
                 : "Generate standard .gitignore?";
+            // Always asked, also in a batch: new rules can leave out folders (bin/, build/) that hold someone's real work
             if (!AskYesNo(question, true))
             {
                 foreach (var type in offered) RunGit(true, "config", "--add", "gitsync.declinedgitignore", type);
@@ -232,6 +233,7 @@ namespace GitSync
             string[] existingNames = { "LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "LICENCE.md", "COPYING" };
             if (existingNames.Any(n => File.Exists(Path.Combine(folderPath, n)))) return;
 
+            if (UsualAnswer("\nNo LICENSE file - add one?", "no")) return;
             WriteLineColor(ConsoleColor.Cyan, "\nNo LICENSE file found.");
             Console.WriteLine("[1] MIT License");
             Console.WriteLine("[2] Apache License 2.0");
@@ -393,7 +395,7 @@ namespace GitSync
             string[] existingNames = { "README.md", "README", "README.txt", "README.rst", "readme.markdown" };
             if (existingNames.Any(n => File.Exists(Path.Combine(folderPath, n)))) return;
 
-            if (!AskYesNo("\nCreate default README.md?", true)) return;
+            if (!(UsualAnswer("\nCreate default README.md?", "yes") || AskYesNo("\nCreate default README.md?", true))) return;
 
             // Intelligent Parsing
             LogVerbose("Parsing project files for metadata...");
@@ -633,6 +635,7 @@ namespace GitSync
                 Console.WriteLine($"    {path}  ({why}" + (rule != "" ? $" - left out by {rule})" : ")"));
             }
             if (core.Count > 10) Console.WriteLine($"    ... and {core.Count - 10} more");
+            // Always asked, also in a batch: it overrides the project's own ignore rules
             if (!AskYesNo("Upload them anyway?", true))
             {
                 try
@@ -679,117 +682,86 @@ namespace GitSync
             }
         }
 
-        static void CheckLargeFiles(string folderPath)
+        // GitHub refuses files over 100 MB. A folder used as the remote (a NAS, a USB drive) takes any size, and other hosts
+        // have their own rules - so only a GitHub remote needs the check.
+        internal static bool RemoteIsGitHub()
         {
-            WriteLineColor(ConsoleColor.Cyan, "\nScanning for large files (>100MB)...");
+            string? web = HasRemote("origin") ? ToWebUrl(GetRemoteUrl()) : null;
+            return web != null && Uri.TryCreate(web, UriKind.Absolute, out var uri)
+                && (uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) || uri.Host.EndsWith(".github.com", StringComparison.OrdinalIgnoreCase));
+        }
 
-            bool lfsAvailable = RunGit(true, "lfs", "version").Output.Contains("git-lfs");
+        // Files over GitHub's 100 MB limit: one question for all of them, with the answer that fits as the default - stored
+        // with Git LFS when it's installed (they're uploaded as usual), otherwise left out (they stay on disk)
+        internal static void CheckLargeFiles(string folderPath)
+        {
+            if (!RemoteIsGitHub()) return;
+            WriteLineColor(ConsoleColor.Cyan, "\nScanning for large files (>100MB)...");
             long limit = 100L * 1024 * 1024;
 
-            // Only files that would actually be committed (respects .gitignore, so node_modules etc. are skipped)
-            var candidates = GetFilesToCommit();
-            LogVerbose($"Scanning {candidates.Count} files...");
+            // Only files that would actually be committed (respects .gitignore, so node_modules etc. are skipped) and that
+            // aren't stored with Git LFS already
+            var tracked = GetTrackedFiles();
             var largeFiles = new List<(string RelPath, long Size)>();
-
-            foreach (var rel in candidates)
+            foreach (var rel in GetFilesToCommit())
             {
                 try
                 {
                     var info = new FileInfo(Path.Combine(folderPath, rel));
-                    if (info.Exists && info.Length > limit) largeFiles.Add((rel, info.Length));
+                    if (!info.Exists || info.Length <= limit) continue;
+                    if (RunGit(true, "check-attr", "filter", "--", rel).Output.Contains("filter: lfs")) continue;
+                    largeFiles.Add((rel, info.Length));
                 }
                 catch { }
             }
-
             if (largeFiles.Count == 0)
             {
                 WriteLineColor(ConsoleColor.Green, "No large files found.");
                 return;
             }
 
-            LogVerbose($"Found {largeFiles.Count} files larger than 100MB.");
-            var tracked = GetTrackedFiles();
-            string ignorePath = Path.Combine(folderPath, ".gitignore");
+            WriteLineColor(ConsoleColor.Yellow, $"\n[WARNING] {largeFiles.Count} file(s) are over GitHub's 100 MB limit, which it refuses:");
+            foreach (var (rel, size) in largeFiles.Take(10)) Console.WriteLine($"    {rel} ({Math.Round(size / 1024.0 / 1024.0, 1)} MB)");
+            if (largeFiles.Count > 10) Console.WriteLine($"    ... and {largeFiles.Count - 10} more");
 
-            foreach (var (relPath, size) in largeFiles)
+            bool lfsAvailable = RunGit(true, "lfs", "version").Output.Contains("git-lfs");
+            bool useLfs;
+            if (lfsAvailable)
             {
-                string extension = Path.GetExtension(relPath);
+                Console.WriteLine("Git LFS uploads files this big as usual (GitHub keeps them apart from the code).");
+                string choice = AskChoice("Enter = store them with Git LFS (recommended), s = leave them out (they stay on your disk), c = cancel: ", "", "s", "c");
+                if (choice == "c") throw new UserAbortException("Cancelled at the large file check.");
+                useLfs = choice == "";
+            }
+            else
+            {
+                Console.WriteLine("Files this big need Git LFS (it comes with Git for Windows). Without it they can only be left out for now.");
+                if (AskChoice("Enter = leave them out (they stay on your disk), c = cancel: ", "", "c") == "c") throw new UserAbortException("Cancelled at the large file check.");
+                useLfs = false;
+            }
 
-                // Check auto-ignores
-                if (extension.Length > 0 && autoIgnoreExtensions.Contains(extension))
+            string ignorePath = Path.Combine(folderPath, ".gitignore");
+            foreach (var (rel, _) in largeFiles)
+            {
+                if (useLfs)
                 {
-                    LogVerbose($"Auto-skipping large file (extension '{extension}'): {relPath}");
-                    UntrackIfTracked(relPath, tracked); // the new *.ext rule alone wouldn't stop an already committed one
-                    continue;
-                }
-
-                // Already taken care of by .gitignore or Git LFS?
-                if (!tracked.Contains(relPath) && RunGit(true, "check-ignore", "-q", "--", relPath).Success) continue;
-                if (RunGit(true, "check-attr", "filter", "--", relPath).Output.Contains("filter: lfs")) continue;
-
-                double sizeMB = Math.Round(size / 1024.0 / 1024.0, 2);
-                WriteLineColor(ConsoleColor.Yellow, $"\n[WARNING] Large file: {relPath} ({sizeMB} MB) - GitHub rejects files over 100 MB.");
-
-                while (true)
-                {
-                    Console.WriteLine("[1] Skip this file (Add to .gitignore)");
-                    Console.WriteLine("[2] Abort");
-                    Console.WriteLine("[3] Include anyway (the push will most likely be rejected)");
-                    if (lfsAvailable) Console.WriteLine("[4] Track with Git LFS (recommended)");
-                    if (extension.Length > 0) Console.WriteLine($"[5] Skip ALL files with extension '{extension}'");
-
-                    string c = GetUserInput("Choice: ");
-
-                    if (c == "1")
+                    // --filename escapes wildcards; the leading "/" keeps a name like "!old.mp4" from reading as a negation
+                    var track = RecordAppendBy(Path.Combine(folderPath, ".gitattributes"), () => RunGit(true, "lfs", "track", "--filename", "/" + rel));
+                    if (track.Success && RunGit(true, "check-attr", "filter", "--", rel).Output.Contains("filter: lfs"))
                     {
-                        AppendToFile(ignorePath, ToGitIgnoreEntry(relPath) + Environment.NewLine);
-                        UntrackIfTracked(relPath, tracked);
-                        if (!RunGit(true, "check-ignore", "-q", "--no-index", "--", relPath).Success)
-                        {
-                            WriteLineColor(ConsoleColor.Yellow, "Hmm, .gitignore doesn't seem to cover that file (another rule may re-include it). Check .gitignore before pushing.");
-                        }
-                        filesIgnoredCount++;
-                        break;
-                    }
-                    if (c == "2") throw new UserAbortException("Aborted at the large file check.");
-                    if (c == "3") break;
-                    if (c == "4" && lfsAvailable)
-                    {
-                        // --filename escapes wildcards; the leading "/" keeps a name like "!old.mp4" from reading as a negation
-                        var track = RecordAppendBy(Path.Combine(folderPath, ".gitattributes"), () => RunGit(true, "lfs", "track", "--filename", "/" + relPath));
-                        if (!track.Success)
-                        {
-                            ExplainGitFailure(track, "Git LFS");
-                            continue;
-                        }
-                        if (!RunGit(true, "check-attr", "filter", "--", relPath).Output.Contains("filter: lfs"))
-                        {
-                            WriteLineColor(ConsoleColor.Yellow, "Git LFS didn't pick that file up - check .gitattributes, or skip the file instead.");
-                            continue;
-                        }
-                        // A file committed earlier must be re-added for LFS to take over
-                        UntrackIfTracked(relPath, tracked);
+                        UntrackIfTracked(rel, tracked); // a file committed earlier must be added again for LFS to take over
                         lfsTrackedCount++;
-                        break;
+                        continue;
                     }
-                    if (c == "5" && extension.Length > 0)
-                    {
-                        // "*.json" for one huge dump would also drop package.json & co. - say so first
-                        var smaller = candidates.Where(f => string.Equals(Path.GetExtension(f), extension, StringComparison.OrdinalIgnoreCase)
-                                                         && !largeFiles.Any(l => l.RelPath == f)).ToList();
-                        if (smaller.Count > 0)
-                        {
-                            WriteLineColor(ConsoleColor.Yellow, $"That would also leave out {smaller.Count} smaller '{extension}' file(s), e.g. {string.Join(", ", smaller.Take(3))}.");
-                            if (!AskYesNo($"Leave out every '{extension}' file anyway?", false)) continue;
-                        }
-                        autoIgnoreExtensions.Add(extension);
-                        AppendToFile(ignorePath, "*" + EscapeGlob(extension) + Environment.NewLine);
-                        UntrackIfTracked(relPath, tracked);
-                        LogVerbose($"Added *{extension} to .gitignore. Future files of this type will be skipped.");
-                        filesIgnoredCount++;
-                        break;
-                    }
+                    WriteLineColor(ConsoleColor.Yellow, $"Git LFS didn't take {rel} - it's left out instead (it stays on your disk).");
                 }
+                AppendToFile(ignorePath, ToGitIgnoreEntry(rel) + Environment.NewLine);
+                UntrackIfTracked(rel, tracked);
+                if (!RunGit(true, "check-ignore", "-q", "--no-index", "--", rel).Success)
+                {
+                    WriteLineColor(ConsoleColor.Yellow, $".gitignore doesn't seem to cover {rel} (another rule may bring it back) - check .gitignore before pushing.");
+                }
+                filesIgnoredCount++;
             }
         }
 
@@ -1013,10 +985,10 @@ namespace GitSync
             return flagged.Distinct().ToList();
         }
 
-        // onlyChangedFiles: TODOs in files that haven't changed since the last sync were already shown before
-        static bool CheckQualityGates(string folder, bool onlyChangedFiles)
+        // TODO/FIXME comments are worth knowing about, never a reason to stop: one line, no question.
+        // onlyChangedFiles: TODOs in files that haven't changed since the last sync were already mentioned before.
+        static void NoteTodoComments(string folder, bool onlyChangedFiles)
         {
-            Console.WriteLine("\n[Quality Gate] Checking code quality...");
             var perFile = new List<(string File, int Count)>();
 
             // TODO Scanner - only files that will be committed, text files under 1MB
@@ -1033,24 +1005,10 @@ namespace GitSync
                 catch { }
             }
 
-            int issues = perFile.Sum(p => p.Count);
-            if (issues > 0)
-            {
-                WriteLineColor(ConsoleColor.Yellow, $"Found {issues} TODO/FIXME comments.");
-                foreach (var (file, count) in perFile.OrderByDescending(p => p.Count).Take(5))
-                {
-                    Console.WriteLine($"    {count,4}  {file}");
-                }
-
-                string choice = AskChoice("Issues found. [1] Abort, [2] Push Anyway (MASTER OVERRIDE) (Enter = 2): ", "1", "2", "");
-                if (choice == "1") return false;
-            }
-            else
-            {
-                Console.WriteLine("No TODOs found. Clean.");
-            }
-
-            return true;
+            int total = perFile.Sum(p => p.Count);
+            if (total == 0) return;
+            var most = perFile.OrderByDescending(p => p.Count).Take(3).Select(p => $"{p.File} ({p.Count})");
+            LogVerbose($"Note: {total} TODO/FIXME comment(s) in what's being uploaded - most in {string.Join(", ", most)}.");
         }
 
         static bool IsProbablyBinary(string path)

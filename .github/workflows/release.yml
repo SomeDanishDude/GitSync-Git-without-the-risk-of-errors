@@ -1,0 +1,34 @@
+# Publishing a release on GitHub (Releases > Draft a new release > a tag like v1.1.0 > Publish release) builds GitSync.exe
+# for that version and attaches it to the release. Everyone's GitSync then mentions the new version when it starts.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build GitSync.exe for this version
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v', 'V')
+          dotnet publish GitSync/GitSync.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:Version=$version -o publish
+
+      - name: Attach it to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload $env:TAG publish/GitSync.exe --clobber
