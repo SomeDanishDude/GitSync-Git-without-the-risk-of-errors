@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -12,8 +13,8 @@ namespace GitSync
     // What a file in the checked folder is, compared with the GitHub repository
     internal enum FileKind
     {
-        // On GitHub, or nothing to lose
-        Same, SameExceptLineEndings, LfsConfirmed, Elsewhere, NewerOnGitHub, InHistory, Generated, Empty,
+        // On GitHub, or nothing to lose (Saved: in a copy the user kept outside the folder; NotNeeded: the user's answer)
+        Same, SameExceptLineEndings, LfsConfirmed, Elsewhere, NewerOnGitHub, InHistory, Generated, Empty, Saved, NotNeeded,
         // Most likely on GitHub, but not confirmed
         LfsUnconfirmed,
         // Only here: deleting the folder would lose these
@@ -35,6 +36,7 @@ namespace GitSync
         public long LfsSize;                // the large file's own size (the folder may only hold its small placeholder)
         public bool Ignored;                // the project's ignore rules leave it out, so Sync wouldn't upload it
         public bool Core;                   // ...although the project needs it (Sync offers to upload it anyway)
+        public string? SavedIn;             // the copy (a ZIP outside the folder) that holds this version of it
         public bool Blocks => Kind is FileKind.LfsMissing or FileKind.Different or FileKind.OnlyHere or FileKind.Unreadable;
     }
 
@@ -317,7 +319,7 @@ namespace GitSync
                 string rel = RelativeTo(folder, nested);
                 if (depth >= 4)
                 {
-                    check.Problems.Add(($"{rel}/ is another Git repository, nested too deep to check", ProblemFix.User));
+                    check.Problems.Add(($"{rel}/ is another Git repository, nested too deep to check here - check it on its own with [5]", ProblemFix.User));
                     continue;
                 }
                 string nestedUrl = GetOriginOf(nested);
@@ -331,7 +333,8 @@ namespace GitSync
                 LogVerbose($"{rel}/ is a Git repository of its own - comparing it with {MaskUrl(nestedUrl)}...");
                 check.Nested.Add(CheckFolder(nested, nestedUrl, nested, "", depth + 1));
             }
-            if (local.NestedRepos.Count > 30) check.Problems.Add(($"{local.NestedRepos.Count - 30} more Git repositories inside weren't checked", ProblemFix.User));
+            if (local.NestedRepos.Count > 30) check.Problems.Add(($"{local.NestedRepos.Count - 30} more Git repositories inside weren't checked - check those folders on their own with [5]", ProblemFix.User));
+            ApplyAnswers(check);
             return check;
         }
 
@@ -407,7 +410,7 @@ namespace GitSync
                 catch (Exception ex)
                 {
                     string where = SamePath(dir, folder) ? "The folder" : RelativeTo(folder, dir) + "/";
-                    check.Problems.Add(($"{where} couldn't be opened ({ex.Message}), so the files in it couldn't be checked", ProblemFix.User));
+                    check.Problems.Add(($"{where} couldn't be opened ({ex.Message}), so the files in it couldn't be checked - make sure you can open it, then check again", ProblemFix.User));
                     continue;
                 }
 
@@ -418,7 +421,7 @@ namespace GitSync
                     {
                         if (check.RepoRoot == null && SamePath(dir, folder))
                         {
-                            check.Problems.Add((".git holds a Git repository that Git can't read (damaged?) - it may have history that isn't on GitHub", ProblemFix.User));
+                            check.Problems.Add((".git holds a Git repository that Git can't read (damaged?) - it may have history that isn't on GitHub, so keep the folder (or a copy of its .git)", ProblemFix.User));
                         }
                         continue;
                     }
@@ -436,7 +439,7 @@ namespace GitSync
                     {
                         if (Regex.IsMatch(d.Name, @"^\.git(-broken-|-gitsync-backup-|\.gitsync-delete-)"))
                         {
-                            check.Problems.Add(($"{rel}/ is an old Git repository folder GitSync set aside - it may hold history that isn't on GitHub", ProblemFix.User));
+                            check.Problems.Add(($"{rel}/ is an old Git repository folder GitSync set aside - it may hold history that isn't on GitHub: delete it first if you're sure you don't need it, or keep the folder", ProblemFix.User));
                             continue;
                         }
                         // Git's storage without project files (a "bare" repository, e.g. a backup copy): one thing, not its hundreds of internal files
@@ -963,10 +966,22 @@ namespace GitSync
             if (!ignored) return null;
             for (int i = 0; i < parts.Length - 1; i++)
             {
-                if (IgnoredGeneratedFolders.Contains(parts[i])) return string.Join("/", parts.Take(i + 1)) + "/";
+                if (IgnoredGeneratedFolders.Contains(parts[i]) || IsCacheTempOrLogFolder(parts[i])) return string.Join("/", parts.Take(i + 1)) + "/";
             }
-            return null;
+            string ext = Path.GetExtension(parts[^1]);
+            return LeftoverExtensions.Contains(ext) ? $"*{ext.ToLowerInvariant()} files" : null;
         }
+
+        // Caches, temporary files and logs - disposable by what they are, whichever tool made them (graphify-out/cache/,
+        // .tmp/, logs/). Only ever asked when the project's rules leave them out. Not "-out" or "output" folders: their
+        // content can be something that took hours (or money) to make, so the user is asked about those.
+        static bool IsCacheTempOrLogFolder(string name) =>
+            Regex.IsMatch(name, @"^(?:\.?(?:cache|caches|tmp|temp|logs?)|.+[-_.]cache)$", RegexOptions.IgnoreCase);
+
+        private static readonly HashSet<string> LeftoverExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".log", ".tmp", ".temp",
+        };
 
         // What only the repository itself holds: commits that aren't on GitHub, stashes, tags, unfinished merges, other work
         // folders. Not for a folder inside a repository: deleting that leaves the repository (and its history) in place.
@@ -1013,7 +1028,7 @@ namespace GitSync
                 int n = NotOnGitHub(commit);
                 if (n < 0)
                 {
-                    check.Problems.Add(($"the branch '{name}' couldn't be compared with GitHub", ProblemFix.User));
+                    check.Problems.Add(($"the branch '{name}' couldn't be compared with GitHub - check again, or keep the folder", ProblemFix.User));
                     continue;
                 }
                 if (n == 0) continue;
@@ -1024,7 +1039,7 @@ namespace GitSync
                     check.Problems.Add((text, ProblemFix.Upload));
                     check.Uploads.Add((commit, "refs/heads/" + name, $"the branch '{name}'"));
                 }
-                else check.Problems.Add((text + " - and GitHub's version of it went another way", ProblemFix.User));
+                else check.Problems.Add((text + $" - and GitHub's version of it went another way: switch to '{name}' in your Git tool and run [1] Sync, which joins the two", ProblemFix.User));
             }
             if (current == "" && !check.Bare)
             {
@@ -1033,7 +1048,7 @@ namespace GitSync
             }
 
             var stashes = RunGit(true, "-C", repo, "log", "-g", "--format=%H", "refs/stash").Output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            if (stashes.Length > 0) check.Problems.Add(($"{stashes.Length} set-aside change(s) made with 'git stash' - those never go to GitHub", ProblemFix.User));
+            if (stashes.Length > 0) check.Problems.Add(($"{stashes.Length} set-aside change(s) made with 'git stash' - those never go to GitHub: apply them in your Git tool (VS Code: Source Control > Stashes) and Sync, or keep the folder", ProblemFix.User));
 
             // Tags: a missing one can be added; one GitHub has with other content is the user's call
             static Dictionary<string, string> Tags(string dir) => RunGit(true, "-C", dir, "for-each-ref", "--format=%(refname)%09%(objectname)", "refs/tags/").Output
@@ -1055,7 +1070,7 @@ namespace GitSync
             }
             string Some(List<string> tags) => string.Join(", ", tags.Take(5)) + (tags.Count > 5 ? ", ..." : "");
             if (newTags.Count > 0) check.Problems.Add(($"tag(s) that aren't on GitHub: {Some(newTags)}", ProblemFix.Upload));
-            if (otherTags.Count > 0) check.Problems.Add((remote == null ? $"tag(s) that aren't on GitHub: {Some(otherTags)}" : $"tag(s) that mean something else on GitHub: {Some(otherTags)}", ProblemFix.User));
+            if (otherTags.Count > 0) check.Problems.Add((remote == null ? $"tag(s) that aren't on GitHub: {Some(otherTags)}" : $"tag(s) that mean something else on GitHub: {Some(otherTags)} - keep the folder if you need them", ProblemFix.User));
 
             // Git names this folder by its real path - which differs from the one the user picked when that goes through a link
             string top = check.Bare ? "" : GitPathOf(repo, "--show-toplevel");
@@ -1065,7 +1080,7 @@ namespace GitSync
                 string other = line.Substring("worktree ".Length).Trim().Replace('/', '\\');
                 // One whose folder is gone already (git calls it "prunable") can't be broken any more
                 if (SamePath(other, repo) || (top != "" && SamePath(other, top)) || SamePath(other, gitDir) || !Directory.Exists(other)) continue;
-                check.Problems.Add(($"another work folder uses this repository ({other}) - deleting this folder breaks it", ProblemFix.User));
+                check.Problems.Add(($"another work folder uses this repository ({other}) - deleting this folder breaks it: Sync that one too and delete both, or keep this folder", ProblemFix.User));
             }
 
             // Hook scripts someone wrote themselves live only in .git\hooks (not the samples, nor ones a tool installs again)
@@ -1079,9 +1094,23 @@ namespace GitSync
                     string text;
                     try { text = new FileInfo(hook).Length > 256 * 1024 ? "" : File.ReadAllText(hook); } catch { text = ""; }
                     if (Regex.IsMatch(text, @"git[ -]lfs|husky|pre-commit\.com|lefthook", RegexOptions.IgnoreCase)) continue;
-                    own.Add(Path.GetFileName(hook));
+                    own.Add(hook);
                 }
-                if (own.Count > 0) check.Problems.Add(($"your own Git hook script(s) in .git\\hooks ({string.Join(", ", own.Take(5))}) - they aren't on GitHub", ProblemFix.User));
+                // Inside the folder: files like any other that never go to GitHub - a copy can be kept, or they're not needed
+                string hooksHere = RelativeTo(check.Folder, hooks);
+                if (own.Count > 0 && !check.Bare && !hooksHere.StartsWith("..") && !Path.IsPathRooted(hooksHere))
+                {
+                    foreach (var hook in own)
+                    {
+                        long size;
+                        try { size = new FileInfo(hook).Length; } catch { size = 0; }
+                        check.Files.Add(new CheckedFile { Path = RelativeTo(check.Folder, hook), Kind = FileKind.OnlyHere, Ignored = true, Size = size, Detail = "your own Git hook script - hooks never go to GitHub" });
+                    }
+                }
+                else if (own.Count > 0)
+                {
+                    check.Problems.Add(($"your own Git hook script(s) in {hooks} ({string.Join(", ", own.Take(5).Select(Path.GetFileName))}) - they aren't on GitHub: copy them somewhere if you still want them", ProblemFix.User));
+                }
             }
         }
 
@@ -1099,7 +1128,7 @@ namespace GitSync
                 }
                 else if (IsSensitiveFileName(name))
                 {
-                    file.Detail = "holds passwords or keys - Sync keeps it off GitHub on purpose, so save it somewhere safe (e.g. a password manager)";
+                    file.Detail = "holds passwords or keys - kept off GitHub on purpose";
                 }
                 else if (file.Kind == FileKind.Different && described++ < 20)
                 {
@@ -1119,8 +1148,9 @@ namespace GitSync
                 }
                 if (file.Ignored && file.Kind != FileKind.Different && !IsSensitiveFileName(name) && file.Detail == "")
                 {
-                    file.Detail = "left out by .gitignore, so Sync won't upload it";
+                    file.Detail = "left out by .gitignore";
                 }
+                if (!file.Ignored && file.Kind == FileKind.OnlyHere && file.Detail == "") file.Detail = "new here, not uploaded yet";
             }
         }
 
@@ -1199,6 +1229,8 @@ namespace GitSync
             FileKind.InHistory => "removed or renamed on GitHub since - its history still has them",
             FileKind.Generated => "build output, downloaded packages and leftovers - recreated when needed",
             FileKind.Empty => "empty files - nothing to lose",
+            FileKind.Saved => "in a copy you kept outside this folder",
+            FileKind.NotNeeded => "not needed - your answer",
             FileKind.LfsUnconfirmed => "large files (Git LFS) GitHub lists - their upload wasn't checked",
             FileKind.LfsMissing => "large files (Git LFS) whose upload is missing on GitHub",
             FileKind.Different => "different from GitHub - this version isn't on GitHub",
@@ -1231,8 +1263,59 @@ namespace GitSync
             {
                 if (check != root) Add($"\n--- Inside: {RelativeTo(root.Folder, check.Folder)}/ (a Git repository of its own) ---", ConsoleColor.Cyan);
                 Add($"Folder:  {check.Folder}");
-                if (check.Url != "") Add($"GitHub:  {MaskUrl(check.Url)}" + (check.Branch != null ? $" (branch '{check.Branch}', plus its other branches and history)" : ""));
+                if (check.Url != "") Add($"GitHub:  {MaskUrl(check.Url)}" + (check.Branch == null ? "" : full ? $" (branch '{check.Branch}', plus its other branches and history)" : $" ({check.Branch})"));
 
+                if (full) AddEveryKind(check);
+                else AddInShort(check);
+
+                if (check.ReadError != null) Add($"\n{check.ReadError}", ConsoleColor.Red);
+                if (check.Problems.Count > 0)
+                {
+                    Add("\nAlso only here:", ConsoleColor.Red);
+                    foreach (var (text, _) in check.Problems) Add($"    - {text}");
+                }
+                foreach (var note in check.Notes) Add($"Note: {note}", ConsoleColor.DarkGray);
+            }
+
+            AddVerdict(root, Add, full);
+            return lines;
+
+            // On screen: on GitHub, nothing to lose, NOT on GitHub - and what isn't, by folder
+            void AddInShort(FolderCheck check)
+            {
+                int onGitHub = check.Files.Count(f => f.Kind is FileKind.Same or FileKind.SameExceptLineEndings or FileKind.LfsConfirmed
+                    or FileKind.Elsewhere or FileKind.NewerOnGitHub or FileKind.InHistory);
+                var leftovers = check.Files.Where(f => f.Kind is FileKind.Generated or FileKind.Empty).ToList();
+                var saved = check.Files.Where(f => f.Kind == FileKind.Saved).ToList();
+                int notNeeded = check.Files.Count(f => f.Kind == FileKind.NotNeeded);
+                var unconfirmed = check.Files.Where(f => f.Kind == FileKind.LfsUnconfirmed).ToList();
+                var missing = check.Files.Where(f => f.Blocks).ToList();
+
+                if (check.Files.Count > 0 || check.OnlyOnGitHub > 0) Add("");
+                if (onGitHub > 0) Add($"{onGitHub,7}  on GitHub");
+                if (leftovers.Count > 0) Add($"{leftovers.Count,7}  nothing to lose: {DescribeLeftovers(leftovers)}");
+                if (saved.Count > 0)
+                {
+                    var zips = saved.Select(f => f.SavedIn).Distinct().ToList();
+                    Add($"{saved.Count,7}  in the copy you kept ({(zips.Count == 1 ? zips[0] : $"{zips.Count} ZIP files")})");
+                }
+                if (notNeeded > 0) Add($"{notNeeded,7}  not needed (your answer)");
+                if (check.OnlyOnGitHub > 0) Add($"{check.OnlyOnGitHub,7}  only on GitHub (nothing to lose here)", ConsoleColor.DarkGray);
+                if (unconfirmed.Count > 0)
+                {
+                    Add($"{unconfirmed.Count,7}  large files (Git LFS) GitHub lists - their upload wasn't checked:", ConsoleColor.Yellow);
+                    foreach (var line in DescribeFiles(unconfirmed, limit)) Add("       " + line);
+                }
+                if (missing.Count > 0)
+                {
+                    Add($"{missing.Count,7}  NOT on GitHub:", ConsoleColor.Red);
+                    foreach (var line in DescribeFiles(missing, limit)) Add("       " + line);
+                }
+            }
+
+            // The saved report: every kind, every file
+            void AddEveryKind(FolderCheck check)
+            {
                 var counts = check.Files.GroupBy(f => f.Kind == FileKind.SameExceptLineEndings ? FileKind.Same : f.Kind).OrderBy(g => g.Key).ToList();
                 if (counts.Count > 0) Add("");
                 foreach (var group in counts)
@@ -1245,42 +1328,42 @@ namespace GitSync
                 }
                 if (check.OnlyOnGitHub > 0) Add($"{check.OnlyOnGitHub,7}  on GitHub but not in this folder (nothing to lose here)", ConsoleColor.DarkGray);
 
-                // What isn't on GitHub, file by file
-                foreach (var kind in new[] { FileKind.Different, FileKind.OnlyHere, FileKind.LfsMissing, FileKind.Unreadable, FileKind.LfsUnconfirmed })
+                foreach (var kind in new[] { FileKind.Different, FileKind.OnlyHere, FileKind.LfsMissing, FileKind.Unreadable, FileKind.LfsUnconfirmed,
+                                             FileKind.NewerOnGitHub, FileKind.Elsewhere, FileKind.InHistory, FileKind.Generated, FileKind.Empty,
+                                             FileKind.Saved, FileKind.NotNeeded, FileKind.LfsConfirmed, FileKind.SameExceptLineEndings, FileKind.Same })
                 {
                     var files = check.Files.Where(f => f.Kind == kind).ToList();
                     if (files.Count == 0) continue;
-                    Add($"\n{char.ToUpper(KindLabel(kind)[0])}{KindLabel(kind).Substring(1)}:", kind == FileKind.LfsUnconfirmed ? ConsoleColor.Yellow : ConsoleColor.Red);
-                    foreach (var line in DescribeFiles(files, limit)) Add(line);
+                    var first = files[0];
+                    Add($"\n{char.ToUpper(KindLabel(kind)[0])}{KindLabel(kind).Substring(1)}:", first.Blocks ? ConsoleColor.Red : kind == FileKind.LfsUnconfirmed ? ConsoleColor.Yellow : null);
+                    foreach (var f in files) Add($"    {f.Path}" + (f.Detail != "" ? $"  ({f.Detail})" : ""));
                 }
-                if (full)
-                {
-                    foreach (var kind in new[] { FileKind.NewerOnGitHub, FileKind.Elsewhere, FileKind.InHistory, FileKind.Generated, FileKind.Empty, FileKind.LfsConfirmed, FileKind.SameExceptLineEndings, FileKind.Same })
-                    {
-                        var files = check.Files.Where(f => f.Kind == kind).ToList();
-                        if (files.Count == 0) continue;
-                        Add($"\n{char.ToUpper(KindLabel(kind)[0])}{KindLabel(kind).Substring(1)}:");
-                        foreach (var f in files) Add($"    {f.Path}" + (f.Detail != "" ? $"  ({f.Detail})" : ""));
-                    }
-                }
-                else
-                {
-                    var generated = check.Files.Where(f => f.Kind == FileKind.Generated).GroupBy(f => f.Detail).OrderByDescending(g => g.Count()).ToList();
-                    if (generated.Count > 0) Add($"Not on GitHub, but recreated when needed: {string.Join(", ", generated.Take(6).Select(g => $"{g.Key} ({g.Count()})"))}", ConsoleColor.DarkGray);
-                }
-
-                if (check.ReadError != null) Add($"\n{check.ReadError}", ConsoleColor.Red);
-                if (check.Problems.Count > 0)
-                {
-                    Add("\nAlso only here:", ConsoleColor.Red);
-                    foreach (var (text, _) in check.Problems) Add($"    - {text}");
-                }
-                foreach (var note in check.Notes) Add($"Note: {note}", ConsoleColor.DarkGray);
             }
-
-            AddVerdict(root, Add);
-            return lines;
         }
+
+        // "made again when you build or install (bin/, obj/, cache/); 3 empty" - the kinds of folder, not every path
+        static string DescribeLeftovers(List<CheckedFile> files)
+        {
+            var parts = new List<string>();
+            var generated = files.Where(f => f.Kind == FileKind.Generated).ToList();
+            if (generated.Count > 0)
+            {
+                var names = generated.Where(f => f.Detail.EndsWith("/")).Select(f => f.Detail.TrimEnd('/'))
+                    .Select(d => d.Substring(d.LastIndexOf('/') + 1) + "/")
+                    .GroupBy(n => n, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()).Select(g => g.Key).Take(4).ToList();
+                parts.Add("build output, downloads and caches - made or fetched again" + (names.Count > 0 ? $" ({string.Join(", ", names)})" : ""));
+            }
+            int empty = files.Count(f => f.Kind == FileKind.Empty);
+            if (empty > 0) parts.Add($"{empty} empty file(s)");
+            return string.Join("; ", parts);
+        }
+
+        static string FormatSize(long bytes) =>
+            bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):0.#} GB" : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):0.#} MB"
+            : bytes >= 1L << 10 ? $"{bytes / 1024.0:0} KB" : $"{bytes} bytes";
+
+        static string JoinWithAnd(List<string> parts) =>
+            parts.Count <= 1 ? string.Concat(parts) : string.Join(", ", parts.Take(parts.Count - 1)) + " and " + parts[^1];
 
         // A file per line - or, for a long list, a line per folder ("AntColony/vcpkg_installed/  (7374 files)"), so what matters
         // stands out instead of 15 random names. Password and key files always get a line of their own. The saved full list
@@ -1290,16 +1373,20 @@ namespace GitSync
             static string Line(CheckedFile f) => $"    {f.Path}" + (f.Detail != "" ? $"  ({f.Detail})" : "");
             if (files.Count <= limit) return files.Select(Line).ToList();
 
-            // Passwords/keys and files the project needs stand out on their own line; the rest is summed up by folder
+            // Passwords/keys and files the project needs stand out on their own line; the rest is summed up by folder - a folder
+            // inside another one in the list counts with it ("graphify-out/cache/" with "graphify-out/")
             var secrets = files.Where(f => f.Core || IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1))).ToList();
             var lines = secrets.Take(limit).Select(Line).ToList();
-            var groups = files.Except(secrets).GroupBy(f => FolderOf(f.Path)).OrderByDescending(g => g.Count()).ToList();
+            var keys = files.Except(secrets).Select(f => FolderOf(f.Path)).Distinct().ToList();
+            string Outer(string key) => keys.Where(k => k != key && k.EndsWith("/") && key.StartsWith(k, StringComparison.Ordinal)).OrderBy(k => k.Length).FirstOrDefault() ?? key;
+            var groups = files.Except(secrets).GroupBy(f => Outer(FolderOf(f.Path))).OrderByDescending(g => g.Count()).ToList();
             int room = Math.Max(5, limit - lines.Count);
             foreach (var group in groups.Take(room))
             {
                 var inFolder = group.ToList();
+                long bytes = inFolder.Sum(f => f.Size);
                 lines.Add(inFolder.Count == 1 ? Line(inFolder[0])
-                    : $"    {group.Key}  ({inFolder.Count} files{(inFolder.All(f => f.Ignored) ? ", left out by .gitignore" : "")})");
+                    : $"    {group.Key}  ({inFolder.Count} files{(bytes > 0 ? ", " + FormatSize(bytes) : "")}{(inFolder.All(f => f.Ignored) ? ", left out by .gitignore" : "")})");
             }
             int rest = groups.Skip(room).Sum(g => g.Count()) + Math.Max(0, secrets.Count - limit);
             if (rest > 0) lines.Add($"    ... and {rest} more file(s) in other places (see the full list)");
@@ -1313,20 +1400,26 @@ namespace GitSync
             return parts.Length == 1 ? path : string.Join("/", parts.Take(Math.Min(parts.Length - 1, 2))) + "/";
         }
 
-        static void AddVerdict(FolderCheck root, Action<string, ConsoleColor?> add)
+        static void AddVerdict(FolderCheck root, Action<string, ConsoleColor?> add, bool full)
         {
             add("\n==========================================", ConsoleColor.Cyan);
             var all = root.All().ToList();
             var blocking = all.SelectMany(c => c.Files.Where(f => f.Blocks)).ToList();
             int problems = all.Sum(c => c.Problems.Count);
             int generated = all.Sum(c => c.Files.Count(f => f.Kind == FileKind.Generated));
+            var saved = all.SelectMany(c => c.Files.Where(f => f.Kind == FileKind.Saved)).ToList();
+            int notNeeded = all.Sum(c => c.Files.Count(f => f.Kind == FileKind.NotNeeded));
 
             if (root.Safe)
             {
                 add("VERDICT: SAFE TO DELETE", ConsoleColor.Green);
-                add("Everything in this folder is on GitHub - or GitHub has a newer version of it.", ConsoleColor.Green);
-                if (generated > 0) add($"({generated} file(s) of build output and downloaded packages aren't, but they're recreated when you build or install the project.)", null);
-                add("GitSync never deletes anything itself. Move the folder to the Recycle Bin, so you can still get it back.", null);
+                // Never "everything is on GitHub" when some of it is only in a copy, or was called not needed
+                var apart = new List<string>();
+                if (generated > 0) apart.Add("build output, downloads and caches that are made or fetched again");
+                if (saved.Count > 0) apart.Add($"{saved.Count} file(s) in the copy you kept ({string.Join(", ", saved.Select(f => f.SavedIn).Distinct())})");
+                if (notNeeded > 0) apart.Add($"{notNeeded} file(s) you said aren't needed");
+                add("Everything in this folder is on GitHub" + (apart.Count == 0 ? "." : $", apart from {JoinWithAnd(apart)}."), ConsoleColor.Green);
+                add("GitSync never deletes anything itself: move the folder to the Recycle Bin, so you can still get it back.", null);
                 return;
             }
             if (!root.HasBlockers)
@@ -1337,49 +1430,49 @@ namespace GitSync
                 return;
             }
 
-            add("VERDICT: NOT SAFE TO DELETE YET", ConsoleColor.Red);
-            string what = blocking.Count > 0 && problems > 0 ? $"{blocking.Count} file(s) and {problems} other thing(s)"
-                        : blocking.Count > 0 ? $"{blocking.Count} file(s)" : $"{problems} thing(s)";
+            string what = blocking.Count > 0 && problems > 0 ? $"{blocking.Count} file(s) and {problems} other thing(s) only exist"
+                        : blocking.Count > 0 ? $"{blocking.Count} file(s) only exist" : $"{problems} thing(s) only exist";
             var unread = all.Where(c => c.ReadError != null).ToList();
-            if (blocking.Count > 0 || problems > 0) add($"{what} would be lost - they only exist on this computer.", ConsoleColor.Red);
+            add(blocking.Count > 0 || problems > 0 ? $"VERDICT: NOT SAFE TO DELETE YET - {what} on this computer." : "VERDICT: NOT SAFE TO DELETE YET", ConsoleColor.Red);
             if (unread.Count > 0) add($"GitHub's copy of {(unread.Count == 1 && unread[0] == root ? "this folder" : $"{unread.Count} project(s)")} couldn't be read, so that part couldn't be checked at all.", ConsoleColor.Red);
 
-            // What to do about it - only the parts that apply
-            var secrets = blocking.Where(f => IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1))).ToList();
+            // What to do. On screen only what no question right below takes care of (each "Also only here" line says its own);
+            // the saved report has every step.
+            var todo = new List<string>();
+            if (unread.Count > 0) todo.Add("Check the GitHub address and your internet connection (and that you're signed in), then check again.");
             var core = blocking.Where(f => f.Core).ToList();
-            var ignored = blocking.Where(f => f.Ignored && !f.Core && !secrets.Contains(f)).ToList();
-            add("\nWhat to do:", null);
-            if (unread.Count > 0) add("  - Check the GitHub address and your internet connection (and that you're signed in), then check again.", null);
-            if (blocking.Any(f => f.Kind == FileKind.LfsMissing)) add("  - Upload the missing large files again (GitSync offers to do it now).", null);
-            var toSync = SyncCandidates(root);
-            if (toSync.Count > 0)
-            {
-                var names = toSync.Select(c => RelativeTo(root.Folder, SyncFolderFor(c))).Where(n => n != ".").Select(n => n + "/").ToList();
-                add("  - Upload the changes with [1] Sync" + (names.Count > 0 ? $" (in {string.Join(", ", names)})" : "") + ", then check again.", null);
-            }
-            if (core.Count > 0)
-            {
-                add($"  - Your .gitignore leaves out {core.Count} file(s) the project needs (e.g. {string.Join(", ", core.Take(3).Select(f => f.Path))}),", null);
-                add("    so they were never uploaded. Sync names the rule that does it and offers to upload them anyway.", null);
-            }
+            if (core.Count > 0) todo.Add($"Your .gitignore leaves out {core.Count} file(s) the project needs (e.g. {string.Join(", ", core.Take(3).Select(f => f.Path))}) - Sync names the rule that does it and offers to upload them.");
             foreach (var part in all.Where(c => MatchesOnlyPartOfGitHub(c) && c.Files.Any(f => f.Blocks)))
             {
-                add($"  - This folder is only the '{part.Prefix}' part of the GitHub project: copy its changed files into that folder of a clone", null);
-                add("    of the project ([3] Clone), Sync the clone, then check again.", null);
+                todo.Add($"This folder is only the '{part.Prefix}' part of the GitHub project: copy its changed files into that folder of a clone of the project ([3] Clone), Sync the clone, then check again.");
             }
-            if (all.Any(c => c.Uploads.Count > 0 && CanUploadTo(c))) add("  - Upload the branches and tags GitHub doesn't have yet (GitSync offers to do it now).", null);
-            if (secrets.Count > 0) add($"  - Save {string.Join(", ", secrets.Take(3).Select(f => f.Path))} somewhere safe (a password manager) - passwords and keys don't belong on GitHub.", null);
-            if (ignored.Count > 0)
+            if (all.Any(c => c.Problems.Any(p => p.Fix == ProblemFix.Upload) && !CanUploadTo(c))) todo.Add("Upload the branches and tags with your Git tool (this repository's own GitHub address is a different one), or keep the folder.");
+            if (blocking.Any(f => f.Kind == FileKind.Unreadable)) todo.Add("Close programs that have files open here, then check again.");
+            var keep = all.SelectMany(c => c.Files.Where(IsKeepCandidate)).ToList();
+            if (keep.Count > 0 && CopyFolderFor(root.Folder) == null) todo.Add($"Copy the {keep.Count} file(s) that won't go to GitHub somewhere outside this folder, if you still need them.");
+            if (full)
             {
-                string where = string.Join(", ", ignored.GroupBy(f => FolderOf(f.Path)).OrderByDescending(g => g.Count()).Take(3).Select(g => g.Key));
-                add($"  - {ignored.Count} file(s) are left out by .gitignore, so Sync won't upload them (in {where}).", null);
-                add("    If that's build output or downloaded packages, losing it is fine - anything else, copy it somewhere safe first.", null);
+                if (blocking.Any(f => f.Kind == FileKind.LfsMissing)) todo.Add("Upload the missing large files again (GitSync offers to do it).");
+                var toSync = SyncCandidates(root);
+                if (toSync.Count > 0) todo.Add("Upload the changes with [1] Sync (GitSync offers to do it), then check again.");
+                if (all.Any(c => c.Uploads.Count > 0 && CanUploadTo(c))) todo.Add("Upload the branches and tags GitHub doesn't have yet (GitSync offers to do it).");
+                if (keep.Count > 0) todo.Add($"Keep a copy of the {keep.Count} file(s) that won't go to GitHub (GitSync offers to) - or, except for passwords and keys, say they aren't needed.");
             }
-            if (all.Any(c => c.Problems.Any(p => p.Fix == ProblemFix.User || (p.Fix == ProblemFix.Upload && !CanUploadTo(c)))))
+            if (todo.Count > 0)
             {
-                add("  - GitSync can't upload the other things under \"Also only here\": sort them out yourself (e.g. in VS Code), or keep the folder.", null);
+                add("\nWhat to do:", null);
+                foreach (var step in todo) add($"  - {step}", null);
             }
-            if (blocking.Any(f => f.Kind == FileKind.Unreadable)) add("  - Close programs that have files open here, then check again.", null);
+        }
+
+        // The verdict again, after an answer changed it - without reading GitHub again
+        static void PrintVerdict(FolderCheck check)
+        {
+            AddVerdict(check, (text, color) =>
+            {
+                if (color is { } c) WriteLineColor(c, text);
+                else Console.WriteLine(text);
+            }, full: false);
         }
 
         // Branches and tags are uploaded to the repository's own 'origin' - only when that's the GitHub repository it was compared with
@@ -1401,7 +1494,7 @@ namespace GitSync
         }
 
         // Only the steps that fit what was found - each one a single yes/no - and then the check runs again by itself
-        static void OfferNextStep(FolderCheck check)
+        internal static void OfferNextStep(FolderCheck check)
         {
             if (!check.HasBlockers) return;
             int pushesBefore = successfulPushes;
@@ -1453,12 +1546,195 @@ namespace GitSync
                 }
             }
 
-            // 4. Then the same check again - after Sync, or right away when something was uploaded here
+            // 4. Files no upload takes (left out by .gitignore, passwords and keys, own Git hooks): a copy outside the folder -
+            //    or, for what isn't a password, "not needed". One question, remembered outside the folder.
+            var keep = check.All().SelectMany(c => c.Files.Where(IsKeepCandidate).Select(f => (Check: c, File: f))).ToList();
+            bool answered = keep.Count > 0 && OfferToKeepACopy(check, keep);
+
+            // 5. Then the verdict again - after Sync, right away when something was uploaded here, or at once after an answer
             if (syncQueued) QueueMode("Check", HandleSafeToDelete, check.Folder, onlyIf: () => successfulPushes > pushesBefore);
             else if (successfulPushes > pushesBefore)
             {
                 WriteLineColor(ConsoleColor.Green, "Uploaded. Checking again...");
                 QueueMode("Check", HandleSafeToDelete, check.Folder, onlyIf: null);
+            }
+            else if (answered) PrintVerdict(check);
+        }
+
+        // =================================================================================
+        // Files no upload takes: a copy kept outside the folder, or "not needed"
+        // =================================================================================
+
+        // Left out by .gitignore (and not needed by the project), passwords and keys, own Git hooks - nothing GitSync uploads
+        static bool IsKeepCandidate(CheckedFile f) => f.Kind is FileKind.OnlyHere or FileKind.Different && ((f.Ignored && !f.Core) || IsSecretFile(f));
+
+        static bool IsSecretFile(CheckedFile f) => IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1));
+
+        static string FullPathOf(FolderCheck c, CheckedFile f) => Path.GetFullPath(Path.Combine(c.Folder, f.Path.Replace('/', Path.DirectorySeparatorChar)));
+
+        // Where kept copies go: Documents\GitSync\Saved files - never inside the folder that is about to be deleted
+        internal static string? CopyFolderFor(string checkedFolder)
+        {
+            string? custom = Environment.GetEnvironmentVariable("GITSYNC_SAVE_DIR");
+            string documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            if (string.IsNullOrEmpty(custom) && documents == "") return null;
+            string dir = FullFolderPath(string.IsNullOrEmpty(custom) ? Path.Combine(documents, "GitSync", "Saved files") : custom);
+            string folder = FullFolderPath(checkedFolder).TrimEnd(Path.DirectorySeparatorChar);
+            bool inside = dir.Equals(folder, StringComparison.OrdinalIgnoreCase) || dir.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            return inside ? null : dir;
+        }
+
+        // One question for what no upload takes. Yes: a ZIP outside the folder, which only counts once it's reopened and holds
+        // every file at its full size. No: not needed - never for passwords and keys. True when the answer changed the verdict.
+        static bool OfferToKeepACopy(FolderCheck root, List<(FolderCheck Check, CheckedFile File)> keep)
+        {
+            string? folder = CopyFolderFor(root.Folder);
+            if (folder == null) return false; // the verdict already says to copy them somewhere else
+            var secrets = keep.Where(k => IsSecretFile(k.File)).ToList();
+            long bytes = keep.Sum(k => k.File.Size);
+            var shown = keep.Select(k => new CheckedFile
+            {
+                Path = RelativeTo(root.Folder, FullPathOf(k.Check, k.File)), Kind = k.File.Kind, Size = k.File.Size,
+                Ignored = k.File.Ignored, Detail = IsSecretFile(k.File) ? "holds passwords or keys" : k.File.Detail
+            }).ToList();
+
+            WriteLineColor(ConsoleColor.Yellow, $"\n{keep.Count} file(s) here won't go to GitHub - they're left out on purpose:");
+            foreach (var line in DescribeFiles(shown, 5)) Console.WriteLine(line);
+            Console.WriteLine(secrets.Count == keep.Count
+                ? $"Passwords and keys don't belong on GitHub. GitSync can keep a copy of them in {folder}."
+                : $"Not needed? Then they can go with the folder. If you want them, GitSync keeps a copy in {folder}.");
+            if (secrets.Count > 0) Console.WriteLine($"(The copy holds {string.Join(", ", secrets.Take(2).Select(s => s.File.Path))} with passwords or keys - keep it private.)");
+
+            if (AskYesNo($"Keep a copy ({FormatSize(bytes)})?", true))
+            {
+                string? zip = SaveCopy(root, keep, folder);
+                if (zip == null) return false;
+                WriteLineColor(ConsoleColor.Green, $"Kept a copy of {keep.Count} file(s) in {zip} (checked: it opens and holds every one of them).");
+                return true;
+            }
+
+            // "Not needed" - remembered for exactly these versions: a file changed (or added) since is asked about again
+            var answers = new List<(string Path, FileAnswer Answer)>();
+            foreach (var (c, f) in keep.Where(k => !IsSecretFile(k.File)))
+            {
+                string full = FullPathOf(c, f);
+                try
+                {
+                    var info = new FileInfo(full);
+                    if (!info.Exists) continue;
+                    answers.Add((full, new FileAnswer("notneeded", info.Length, info.LastWriteTimeUtc.Ticks, "")));
+                    (f.Kind, f.Detail) = (FileKind.NotNeeded, "you said it isn't needed");
+                }
+                catch { }
+            }
+            SaveAnswers(answers);
+            if (answers.Count > 0) Log($"Not needed ({root.Folder}): {answers.Count} file(s)");
+            Console.WriteLine(secrets.Count > 0
+                ? $"OK - the rest can go with the folder. Keep {string.Join(", ", secrets.Take(2).Select(s => s.File.Path))} somewhere safe (a password manager), or keep the folder."
+                : "OK - they can go with the folder. (GitSync remembers that, as long as they don't change.)");
+            return answers.Count > 0;
+        }
+
+        // A ZIP of the files, outside the checked folder - reopened afterwards: only a complete copy counts
+        static string? SaveCopy(FolderCheck root, List<(FolderCheck Check, CheckedFile File)> keep, string folder)
+        {
+            string name = string.Concat(Path.GetFileName(root.Folder.TrimEnd(Path.DirectorySeparatorChar)).Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+            if (name == "") name = "drive";
+            string stamp = DateTime.Now.ToString("yyyy-MM-dd HHmm");
+            string zip = Path.Combine(folder, $"{name} {stamp}.zip");
+            for (int n = 2; File.Exists(zip); n++) zip = Path.Combine(folder, $"{name} {stamp} ({n}).zip");
+
+            var saved = new List<(string Full, string Entry, long Size, long Ticks)>();
+            try
+            {
+                Directory.CreateDirectory(folder);
+                Console.WriteLine($"Copying {keep.Count} file(s)...");
+                using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+                {
+                    foreach (var (c, f) in keep)
+                    {
+                        string full = FullPathOf(c, f);
+                        var info = new FileInfo(full);
+                        long size = info.Length, ticks = info.LastWriteTimeUtc.Ticks;
+                        string entry = RelativeTo(root.Folder, full);
+                        archive.CreateEntryFromFile(full, entry, CompressionLevel.Fastest);
+                        saved.Add((full, entry, size, ticks));
+                    }
+                }
+                using (var reopened = ZipFile.OpenRead(zip))
+                {
+                    var entries = reopened.Entries.GroupBy(e => e.FullName, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First().Length, StringComparer.Ordinal);
+                    if (entries.Count != saved.Count || saved.Any(s => !entries.TryGetValue(s.Entry, out long length) || length != s.Size))
+                    {
+                        throw new IOException("the copy doesn't hold every file at its full size (did one change while it was copied?)");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try { if (File.Exists(zip)) File.Delete(zip); } catch { }
+                WriteLineColor(ConsoleColor.Red, $"The copy couldn't be made ({ex.Message}) - nothing counts as kept.");
+                return null;
+            }
+
+            SaveAnswers(saved.Select(s => (s.Full, new FileAnswer("saved", s.Size, s.Ticks, zip))));
+            foreach (var (_, f) in keep) (f.Kind, f.Detail, f.SavedIn) = (FileKind.Saved, $"in {zip}", zip);
+            Log($"Kept a copy of {saved.Count} file(s) from {root.Folder} in {zip}");
+            return zip;
+        }
+
+        // The answers, outside the project (the check changes nothing in it): one line per file version
+        sealed record FileAnswer(string Kind, long Size, long Ticks, string Zip);
+
+        static string AnswersPath => Path.Combine(DataDir, "safe_to_delete_answers.txt");
+
+        static Dictionary<string, FileAnswer> LoadAnswers()
+        {
+            var answers = new Dictionary<string, FileAnswer>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(AnswersPath)) return answers;
+                foreach (var line in File.ReadAllLines(AnswersPath))
+                {
+                    var p = line.Split('\t');
+                    if (p.Length < 5 || !long.TryParse(p[2], out long size) || !long.TryParse(p[3], out long ticks)) continue;
+                    answers[p[1]] = new FileAnswer(p[0], size, ticks, p[4]); // the latest answer counts
+                }
+            }
+            catch { }
+            return answers;
+        }
+
+        static void SaveAnswers(IEnumerable<(string Path, FileAnswer Answer)> answers)
+        {
+            try
+            {
+                Directory.CreateDirectory(DataDir);
+                File.AppendAllLines(AnswersPath, answers.Select(a => $"{a.Answer.Kind}\t{a.Path}\t{a.Answer.Size}\t{a.Answer.Ticks}\t{a.Answer.Zip}"));
+            }
+            catch { }
+        }
+
+        // What the user answered before, for files that haven't changed since: in the copy (while the ZIP is there), or not
+        // needed (never for passwords and keys)
+        static void ApplyAnswers(FolderCheck check)
+        {
+            var candidates = check.Files.Where(IsKeepCandidate).ToList();
+            if (candidates.Count == 0) return;
+            var answers = LoadAnswers();
+            if (answers.Count == 0) return;
+            foreach (var file in candidates)
+            {
+                string full = FullPathOf(check, file);
+                if (!answers.TryGetValue(full, out var answer)) continue;
+                try
+                {
+                    var info = new FileInfo(full);
+                    if (!info.Exists || info.Length != answer.Size || info.LastWriteTimeUtc.Ticks != answer.Ticks) continue;
+                }
+                catch { continue; }
+                if (answer.Kind == "saved" && File.Exists(answer.Zip)) (file.Kind, file.Detail, file.SavedIn) = (FileKind.Saved, $"in {answer.Zip}", answer.Zip);
+                else if (answer.Kind == "notneeded" && !IsSecretFile(file)) (file.Kind, file.Detail) = (FileKind.NotNeeded, "you said it isn't needed");
             }
         }
 
