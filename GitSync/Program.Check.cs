@@ -34,6 +34,7 @@ namespace GitSync
         public string? LfsOid, LfsBranch;
         public long LfsSize;                // the large file's own size (the folder may only hold its small placeholder)
         public bool Ignored;                // the project's ignore rules leave it out, so Sync wouldn't upload it
+        public bool Core;                   // ...although the project needs it (Sync offers to upload it anyway)
         public bool Blocks => Kind is FileKind.LfsMissing or FileKind.Different or FileKind.OnlyHere or FileKind.Unreadable;
     }
 
@@ -71,15 +72,30 @@ namespace GitSync
         // Dependency and cache folders: always recreated by installing or building, whatever the project's rules say
         private static readonly HashSet<string> AlwaysGeneratedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "node_modules", "__pycache__", ".gradle", ".vs", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".dart_tool",
-            ".next", ".nuxt", ".parcel-cache", ".turbo", ".svelte-kit", ".angular", "DerivedDataCache", ".godot", ".import",
+            // JavaScript & co.
+            "node_modules", "bower_components", "jspm_packages", ".pnpm-store", ".next", ".nuxt", ".parcel-cache", ".turbo",
+            ".svelte-kit", ".angular", ".sass-cache", ".nyc_output", "elm-stuff",
+            // Python
+            "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".eggs",
+            // C/C++: vcpkg's installed packages (vcpkg install brings them back), CMake's and Visual Studio's working folders
+            "vcpkg_installed", "CMakeFiles", "ipch", ".vs",
+            // Java/Android, Dart, Haskell, Terraform
+            ".gradle", ".cxx", ".externalNativeBuild", ".dart_tool", ".stack-work", ".terraform",
+            // Game engines and Xcode
+            "DerivedDataCache", ".godot", ".import", "DerivedData",
         };
+
+        static bool IsAlwaysGeneratedFolder(string name) =>
+            AlwaysGeneratedFolders.Contains(name)
+            || name.StartsWith("cmake-build-", StringComparison.OrdinalIgnoreCase)   // CLion: cmake-build-debug, cmake-build-release...
+            || name.EndsWith(".egg-info", StringComparison.OrdinalIgnoreCase);       // Python packaging
 
         // Build output - but only when the project's ignore rules leave it out: a folder called "build" can hold real sources
         private static readonly HashSet<string> IgnoredGeneratedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "bin", "obj", "build", "builds", "dist", "out", "target", "Library", "Temp", "Intermediate", "Binaries", "vendor",
-            "packages", "venv", ".venv", "Debug", "Release", "x64", "x86", "TestResults", "Pods", "coverage", ".cache",
+            "bin", "obj", "build", "builds", "_build", ".build", "dist", "out", "target", "Library", "Temp", "Intermediate",
+            "Binaries", "vendor", "packages", "venv", ".venv", "Debug", "Release", "x64", "x86", "TestResults", "Pods",
+            "coverage", "htmlcov", ".cache", "buildtrees",
         };
 
         sealed class LocalScan
@@ -428,9 +444,13 @@ namespace GitSync
                             check.Problems.Add(($"{rel}/ is a Git repository's storage (a \"bare\" repository) - check that folder on its own with [5]", ProblemFix.User));
                             continue;
                         }
-                        if (AlwaysGeneratedFolders.Contains(d.Name))
+                        // node_modules & co., and folders a tool fills completely (a CMake build folder, a Python environment -
+                        // whatever they're called): tens of thousands of files that building or installing recreates -
+                        // counted, not compared
+                        string? treeKind = IsAlwaysGeneratedFolder(d.Name) ? "" : GeneratedTreeKind(d.FullName);
+                        if (treeKind != null)
                         {
-                            // node_modules & co.: tens of thousands of files that installing recreates - counted, not compared
+                            string label = rel + "/" + (treeKind != "" ? $" ({treeKind})" : "");
                             try
                             {
                                 var all = new EnumerationOptions { AttributesToSkip = 0, IgnoreInaccessible = true, RecurseSubdirectories = true };
@@ -438,7 +458,7 @@ namespace GitSync
                                 {
                                     // A password or key file is never just "build output", wherever it is
                                     if (IsSensitiveFileName(f.Name)) scan.Files.Add(RelativeTo(folder, f.FullName));
-                                    else scan.Generated.Add((RelativeTo(folder, f.FullName), rel + "/"));
+                                    else scan.Generated.Add((RelativeTo(folder, f.FullName), label));
                                 }
                             }
                             catch { }
@@ -828,28 +848,64 @@ namespace GitSync
             if (blocking.Count == 0) return;
 
             HashSet<string> ignored;
+            string[] where;      // how git reads this project's ignore rules
+            string toGit = "";   // what goes in front of a file's path for git
             if (check.RepoRoot != null && !check.Bare)
             {
-                string prefix = check.Prefix; // the folder's place in its repository
-                var result = ExecuteGit(new[] { "-C", check.RepoRoot, "check-ignore", "--no-index", "-z", "--stdin" },
-                    silent: true, live: false, input: string.Concat(blocking.Select(f => prefix + f.Path + "\0")));
-                ignored = new HashSet<string>(SplitNul(result.Output).Select(p => p.Substring(Math.Min(prefix.Length, p.Length))));
+                where = new[] { "-C", check.RepoRoot };
+                toGit = check.Prefix; // the folder's place in its repository
+                var result = ExecuteGit(where.Concat(new[] { "check-ignore", "--no-index", "-z", "--stdin" }).ToArray(),
+                    silent: true, live: false, input: string.Concat(blocking.Select(f => toGit + f.Path + "\0")));
+                ignored = new HashSet<string>(SplitNul(result.Output).Select(p => p.Substring(Math.Min(toGit.Length, p.Length))));
             }
             else
             {
                 // A plain folder: its own .gitignore files decide, read through a Git folder elsewhere (nothing is written here)
                 string gitDir = check.TempRepo != null && Directory.Exists(check.TempRepo) ? check.TempRepo : NewScratchRepo();
-                var result = ExecuteGit(new[] { "--git-dir=" + gitDir, "--work-tree=" + check.Folder, "check-ignore", "--no-index", "-z", "--stdin" },
+                where = new[] { "--git-dir=" + gitDir, "--work-tree=" + check.Folder };
+                var result = ExecuteGit(where.Concat(new[] { "check-ignore", "--no-index", "-z", "--stdin" }).ToArray(),
                     silent: true, live: false, input: string.Concat(blocking.Select(f => f.Path + "\0")));
                 ignored = new HashSet<string>(SplitNul(result.Output));
+            }
+
+            // Files the project needs although its .gitignore leaves them out (a too-broad rule): never "build output", and
+            // Sync offers to upload them. Judged from the project's own top folder.
+            string projectRoot = check.RepoRoot ?? (check.LocalBase != "" ? Path.Combine(check.Folder, check.LocalBase.Replace('/', Path.DirectorySeparatorChar)) : check.Folder);
+            string? InProject(CheckedFile f) => check.RepoRoot != null ? check.Prefix + f.Path
+                : check.LocalBase == "" ? f.Path
+                : f.Path.StartsWith(check.LocalBase + "/") ? f.Path.Substring(check.LocalBase.Length + 1) : null;
+            var shape = ReadProjectShape(projectRoot);
+            var core = new List<(CheckedFile File, string Why)>();
+            foreach (var file in blocking.Where(f => ignored.Contains(f.Path)))
+            {
+                string? inProject = InProject(file);
+                string? why = inProject == null ? null : CoreFileReason(shape, inProject);
+                if (why != null) core.Add((file, why));
+            }
+            if (core.Count > 0)
+            {
+                var rules = IgnoreRules(core.Select(c => toGit + c.File.Path), where);
+                var keepOut = check.RepoRoot != null ? ReadKeepOutList(check.RepoRoot) : new HashSet<string>();
+                foreach (var (file, why) in core)
+                {
+                    bool hasRule = rules.TryGetValue(toGit + file.Path, out var rule);
+                    // A rule written for exactly this file, or a file the user chose to keep out: left out on purpose
+                    if ((hasRule && IsRuleForThisFileOnly(rule.Pattern, toGit + file.Path)) || keepOut.Contains(toGit + file.Path)) continue;
+                    file.Core = true;
+                    file.Detail = $"{why} - your .gitignore leaves it out" + (hasRule ? $" with {DescribeRule(rule)}" : "");
+                }
             }
 
             string? self = Environment.ProcessPath;
             foreach (var file in blocking)
             {
                 file.Ignored = ignored.Contains(file.Path);
+                if (file.Core) continue;
                 string full = Path.Combine(check.Folder, file.Path.Replace('/', Path.DirectorySeparatorChar));
                 string? reason = GeneratedReason(file.Path, file.Ignored);
+                // CMake built inside the project folder: its Makefiles and caches sit right next to the sources
+                string name = file.Path.Substring(file.Path.LastIndexOf('/') + 1);
+                if (reason == null && shape.InSourceCMake && IsCMakeOutputName(name)) reason = "CMake's own output (it rewrites these on every build)";
                 if (self != null && string.Equals(Path.GetFullPath(full), self, StringComparison.OrdinalIgnoreCase)) reason = "GitSync itself";
                 if (reason == null) continue;
                 file.Kind = FileKind.Generated;
@@ -864,7 +920,7 @@ namespace GitSync
             if (IsJunkFileName(parts[^1])) return "Windows/Office leftovers";
             for (int i = 0; i < parts.Length - 1; i++)
             {
-                if (AlwaysGeneratedFolders.Contains(parts[i])) return string.Join("/", parts.Take(i + 1)) + "/";
+                if (IsAlwaysGeneratedFolder(parts[i])) return string.Join("/", parts.Take(i + 1)) + "/";
             }
             if (!ignored) return null;
             for (int i = 0; i < parts.Length - 1; i++)
@@ -997,6 +1053,7 @@ namespace GitSync
             int described = 0;
             foreach (var file in check.Files.Where(f => f.Blocks))
             {
+                if (file.Core) continue; // already says what it is and which .gitignore rule leaves it out
                 string name = file.Path.Substring(file.Path.LastIndexOf('/') + 1);
                 if (file.Path.StartsWith(BackupFolderName + "/"))
                 {
@@ -1156,8 +1213,7 @@ namespace GitSync
                     var files = check.Files.Where(f => f.Kind == kind).ToList();
                     if (files.Count == 0) continue;
                     Add($"\n{char.ToUpper(KindLabel(kind)[0])}{KindLabel(kind).Substring(1)}:", kind == FileKind.LfsUnconfirmed ? ConsoleColor.Yellow : ConsoleColor.Red);
-                    foreach (var f in files.Take(limit)) Add($"    {f.Path}" + (f.Detail != "" ? $"  ({f.Detail})" : ""));
-                    if (files.Count > limit) Add($"    ... and {files.Count - limit} more (see the full list)");
+                    foreach (var line in DescribeFiles(files, limit)) Add(line);
                 }
                 if (full)
                 {
@@ -1186,6 +1242,37 @@ namespace GitSync
 
             AddVerdict(root, Add);
             return lines;
+        }
+
+        // A file per line - or, for a long list, a line per folder ("AntColony/vcpkg_installed/  (7374 files)"), so what matters
+        // stands out instead of 15 random names. Password and key files always get a line of their own. The saved full list
+        // has every file.
+        internal static List<string> DescribeFiles(List<CheckedFile> files, int limit)
+        {
+            static string Line(CheckedFile f) => $"    {f.Path}" + (f.Detail != "" ? $"  ({f.Detail})" : "");
+            if (files.Count <= limit) return files.Select(Line).ToList();
+
+            // Passwords/keys and files the project needs stand out on their own line; the rest is summed up by folder
+            var secrets = files.Where(f => f.Core || IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1))).ToList();
+            var lines = secrets.Take(limit).Select(Line).ToList();
+            var groups = files.Except(secrets).GroupBy(f => FolderOf(f.Path)).OrderByDescending(g => g.Count()).ToList();
+            int room = Math.Max(5, limit - lines.Count);
+            foreach (var group in groups.Take(room))
+            {
+                var inFolder = group.ToList();
+                lines.Add(inFolder.Count == 1 ? Line(inFolder[0])
+                    : $"    {group.Key}  ({inFolder.Count} files{(inFolder.All(f => f.Ignored) ? ", left out by .gitignore" : "")})");
+            }
+            int rest = groups.Skip(room).Sum(g => g.Count()) + Math.Max(0, secrets.Count - limit);
+            if (rest > 0) lines.Add($"    ... and {rest} more file(s) in other places (see the full list)");
+            return lines;
+        }
+
+        // The folder a file is grouped under in a long list: its first two folders ("data/raw/"), or the file itself at the top
+        static string FolderOf(string path)
+        {
+            var parts = path.Split('/');
+            return parts.Length == 1 ? path : string.Join("/", parts.Take(Math.Min(parts.Length - 1, 2))) + "/";
         }
 
         static void AddVerdict(FolderCheck root, Action<string, ConsoleColor?> add)
@@ -1221,8 +1308,8 @@ namespace GitSync
 
             // What to do about it - only the parts that apply
             var secrets = blocking.Where(f => IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1))).ToList();
-            var ignored = blocking.Where(f => f.Ignored && !secrets.Contains(f)).ToList();
-            var uploadable = blocking.Where(f => !f.Ignored && !secrets.Contains(f) && f.Kind is FileKind.Different or FileKind.OnlyHere).ToList();
+            var core = blocking.Where(f => f.Core).ToList();
+            var ignored = blocking.Where(f => f.Ignored && !f.Core && !secrets.Contains(f)).ToList();
             add("\nWhat to do:", null);
             if (unread.Count > 0) add("  - Check the GitHub address and your internet connection (and that you're signed in), then check again.", null);
             if (blocking.Any(f => f.Kind == FileKind.LfsMissing)) add("  - Upload the missing large files again (GitSync offers to do it now).", null);
@@ -1232,6 +1319,11 @@ namespace GitSync
                 var names = toSync.Select(c => RelativeTo(root.Folder, SyncFolderFor(c))).Where(n => n != ".").Select(n => n + "/").ToList();
                 add("  - Upload the changes with [1] Sync" + (names.Count > 0 ? $" (in {string.Join(", ", names)})" : "") + ", then check again.", null);
             }
+            if (core.Count > 0)
+            {
+                add($"  - Your .gitignore leaves out {core.Count} file(s) the project needs (e.g. {string.Join(", ", core.Take(3).Select(f => f.Path))}),", null);
+                add("    so they were never uploaded. Sync names the rule that does it and offers to upload them anyway.", null);
+            }
             foreach (var part in all.Where(c => MatchesOnlyPartOfGitHub(c) && c.Files.Any(f => f.Blocks)))
             {
                 add($"  - This folder is only the '{part.Prefix}' part of the GitHub project: copy its changed files into that folder of a clone", null);
@@ -1239,7 +1331,12 @@ namespace GitSync
             }
             if (all.Any(c => c.Uploads.Count > 0 && CanUploadTo(c))) add("  - Upload the branches and tags GitHub doesn't have yet (GitSync offers to do it now).", null);
             if (secrets.Count > 0) add($"  - Save {string.Join(", ", secrets.Take(3).Select(f => f.Path))} somewhere safe (a password manager) - passwords and keys don't belong on GitHub.", null);
-            if (ignored.Count > 0) add($"  - {ignored.Count} file(s) are left out by .gitignore, so Sync won't upload them: copy them somewhere else if you need them.", null);
+            if (ignored.Count > 0)
+            {
+                string where = string.Join(", ", ignored.GroupBy(f => FolderOf(f.Path)).OrderByDescending(g => g.Count()).Take(3).Select(g => g.Key));
+                add($"  - {ignored.Count} file(s) are left out by .gitignore, so Sync won't upload them (in {where}).", null);
+                add("    If that's build output or downloaded packages, losing it is fine - anything else, copy it somewhere safe first.", null);
+            }
             if (all.Any(c => c.Problems.Any(p => p.Fix == ProblemFix.User || (p.Fix == ProblemFix.Upload && !CanUploadTo(c)))))
             {
                 add("  - GitSync can't upload the other things under \"Also only here\": sort them out yourself (e.g. in VS Code), or keep the folder.", null);
@@ -1367,7 +1464,7 @@ namespace GitSync
         static List<FolderCheck> SyncCandidates(FolderCheck root)
         {
             return root.All().Where(c => !c.Bare && c.ReadError == null && !MatchesOnlyPartOfGitHub(c) && (
-                c.Files.Any(f => f.Kind is FileKind.Different or FileKind.OnlyHere && !f.Ignored && !IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1)))
+                c.Files.Any(f => f.Kind is FileKind.Different or FileKind.OnlyHere && (!f.Ignored || f.Core) && !IsSensitiveFileName(f.Path.Substring(f.Path.LastIndexOf('/') + 1)))
                 || c.Problems.Any(p => p.Fix == ProblemFix.Sync))).ToList();
         }
 

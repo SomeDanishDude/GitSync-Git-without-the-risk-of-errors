@@ -22,6 +22,11 @@ project — with safety checks first, and plain-language explanations when somet
   creating a second branch that GitHub doesn't show. A branch that is linked to a differently named remote branch
   (e.g. made with `git checkout -b work origin/main`) is asked about once, and the answer is remembered.
 - It checks the remote URL before using it, and asks before joining two unrelated projects (e.g. a pasted wrong URL).
+- If the `.gitignore` leaves out files the project needs — a rule that is too broad, like `*.txt` taking `CMakeLists.txt`
+  along, or `bin/` hiding a Unity plugin's DLLs — GitSync names the files and the rule, and asks once whether to upload
+  them anyway. It leaves alone what is meant to stay out: generated files in build folders (also CMake builds and
+  Python environments, whatever their name), downloaded packages, files a rule names on purpose (`local_settings.py`),
+  and passwords and keys. Answer no, and it doesn't ask about those files again.
 - A file that only lives on your computer (ignored, like `.env`) is never overwritten when the remote starts tracking a
   file with the same name: your copy is moved to `.gitsync-backup\` first, and GitSync tells you where it is.
 - A file or secret that has to stay out of commits that aren't pushed yet is taken out by rebuilding only those
@@ -42,7 +47,10 @@ that isn't linked to GitHub). It downloads what GitHub has into a temporary fold
 - **Not on GitHub:** edited and new files, ignored files such as `.env` (save passwords and keys in a password manager),
   commits on any branch that were never pushed, stashes, tags, unfinished merges, other work folders using the
   repository, your own Git hook scripts, and large (Git LFS) files whose upload never happened.
-- **Doesn't count:** build output and downloaded packages (`node_modules`, an ignored `bin/`...), which building recreates.
+- **Doesn't count:** build output and downloaded packages (`node_modules`, `vcpkg_installed`, CMake's and CLion's build
+  folders, an ignored `bin/`...), which building or installing recreates. Long lists are summed up by folder.
+- **Flagged separately:** files the project needs that its `.gitignore` leaves out (so they were never uploaded), with
+  the rule that does it — Sync then offers to upload them.
 - Works for a clone, a copy or ZIP download without `.git` (also inside a `project-main\` wrapper folder), part of a
   project, a folder holding several projects (each checked against its own GitHub repository), and Git LFS files — which
   it downloads once to prove they were really uploaded.
